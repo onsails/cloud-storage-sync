@@ -1,9 +1,12 @@
 #![feature(str_strip)]
+#[macro_use]
+extern crate arrayref;
+
 use cloud_storage::object::Object;
 use cloud_storage::Error as CSError;
 use snafu::Snafu;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter, Error as IoError};
+use std::io::{BufRead, BufReader, BufWriter, Error as IoError};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Snafu)]
@@ -45,9 +48,9 @@ pub enum Destination {
 }
 
 impl Source {
-    fn copy_to(&self, dst: Destination) -> Result<(), Error> {
+    fn copy_to(&self, dst: Destination, sync: &Sync) -> Result<(), Error> {
         match dst {
-            Destination::GCS { bucket, path } => self.copy_to_gcs(bucket, path),
+            Destination::GCS { bucket, path } => self.copy_to_gcs(bucket, path, sync),
             Destination::Local(path) => self.copy_to_local(&path),
         }
     }
@@ -82,21 +85,32 @@ impl Source {
         Ok(())
     }
 
-    fn copy_to_gcs(&self, bucket_dst: &str, path_dst: &str) -> Result<(), Error> {
+    fn copy_to_gcs(&self, bucket_dst: &str, path_dst: &str, sync: &Sync) -> Result<(), Error> {
         match self {
             Source::GCS { bucket, path } => {
                 Sync::copy_gcs_to_gcs(bucket, path, bucket_dst, path_dst)
             }
             Source::Local(path) => {
-                Sync::copy_local_to_gcs(path, bucket_dst, &PathBuf::from(path_dst))
+                sync.copy_local_to_gcs(path, bucket_dst, &PathBuf::from(path_dst))
             }
         }
     }
 }
 
-pub struct Sync;
+pub struct Sync {
+    force_overwrite: bool,
+}
 
 impl Sync {
+    /// Creates new Sync instance
+    ///
+    /// Arguments:
+    ///
+    /// * `force_overwrite`: Don't do size and checksum comparison, just overwrite everthing
+    pub fn new(force_overwrite: bool) -> Self {
+        Self { force_overwrite }
+    }
+
     #[doc(hidden)]
     pub fn copy_local_to_local(path_src: &PathBuf, path_dst: &PathBuf) -> Result<(), Error> {
         unimplemented!()
@@ -107,20 +121,21 @@ impl Sync {
      * where [filename] is a string after the last "/" of the path_src
      */
     pub fn copy_local_to_gcs(
+        &self,
         path_src: impl AsRef<Path>,
         bucket_dst: &str,
         path_dst: impl AsRef<Path>,
     ) -> Result<(), Error> {
         let path_buf = PathBuf::from(path_src.as_ref());
         if path_buf.is_dir() {
-            Self::copy_local_dir_to_gcs(path_src, bucket_dst, path_dst)?;
+            self.copy_local_dir_to_gcs(path_src, bucket_dst, path_dst)?;
             Ok(())
         } else {
             let filename = path_buf.file_name().ok_or_else(|| Error::Other {
                 message: "path_src is not a file, should never happen, please report an issue",
             })?;
             let path_dst = path_dst.as_ref().join(filename);
-            Self::copy_local_file_to_gcs(path_src, bucket_dst, path_dst)?;
+            self.copy_local_file_to_gcs(path_src, bucket_dst, path_dst)?;
             Ok(())
         }
     }
@@ -144,6 +159,7 @@ impl Sync {
      * where [filename] is path relative to the path_src
      */
     pub fn copy_local_dir_to_gcs(
+        &self,
         path_src: impl AsRef<Path>,
         bucket: &str,
         path_dst: impl AsRef<Path>,
@@ -153,9 +169,9 @@ impl Sync {
             let entry_path = entry.path();
             let path_dst = path_dst.as_ref().join(entry.file_name());
             if entry_path.is_dir() {
-                Self::copy_local_dir_to_gcs(&entry_path, bucket, &path_dst)?;
+                self.copy_local_dir_to_gcs(&entry_path, bucket, &path_dst)?;
             } else {
-                Self::copy_local_file_to_gcs(&entry_path, bucket, &path_dst)?;
+                self.copy_local_file_to_gcs(&entry_path, bucket, &path_dst)?;
             }
         }
         Ok(())
@@ -165,41 +181,102 @@ impl Sync {
      * Copies local file to gcs bucket
      */
     pub fn copy_local_file_to_gcs(
+        &self,
         path_src: impl AsRef<Path>,
         bucket: &str,
         filename: impl AsRef<Path>,
     ) -> Result<(), Error> {
-        log::trace!(
-            "Copy {:?} to gs://{}/{}",
-            path_src.as_ref(),
+        if !self.should_upload_local(path_src.as_ref(), bucket, filename.as_ref())? {
+            log::trace!("Skip {:?}", path_src.as_ref());
+            Ok(())
+        } else {
+            log::trace!(
+                "Copy {:?} to gs://{}/{}",
+                path_src.as_ref(),
+                bucket,
+                filename.as_ref().display()
+            );
+            let file_src = File::open(path_src.as_ref())?;
+            let metadata = file_src.metadata()?;
+            let length = metadata.len();
+            let reader = BufReader::new(file_src);
+            let mime_type =
+                mime_guess::from_path(path_src).first_or(mime::APPLICATION_OCTET_STREAM);
+            let mime_type_str = mime_type.essence_str();
+            let filename_path = filename.as_ref();
+            let filename = filename_path.to_str().ok_or_else(|| Error::WrongPath {
+                path: filename_path.to_path_buf(),
+            })?;
+            Object::create_streamed(bucket, reader, length, filename, mime_type_str)?;
+            Ok(())
+        }
+    }
+
+    fn should_upload_local(
+        &self,
+        path_src: impl AsRef<Path>,
+        bucket: &str,
+        filename: impl AsRef<Path>,
+    ) -> Result<bool, Error> {
+        if self.force_overwrite {
+            return Ok(true);
+        }
+
+        let src_len = path_src.as_ref().metadata()?.len();
+        if let Ok(object) = Object::read(
             bucket,
-            filename.as_ref().display()
-        );
-        let file_src = File::open(path_src.as_ref())?;
-        let metadata = file_src.metadata()?;
-        let length = metadata.len();
-        let reader = BufReader::new(file_src);
-        let mime_type = mime_guess::from_path(path_src).first_or(mime::APPLICATION_OCTET_STREAM);
-        let mime_type_str = mime_type.essence_str();
-        let filename_path = filename.as_ref();
-        let filename = filename_path.to_str().ok_or_else(|| Error::WrongPath {
-            path: filename_path.to_path_buf(),
-        })?;
-        Object::create_streamed(bucket, reader, length, filename, mime_type_str)?;
-        Ok(())
+            filename.as_ref().to_str().ok_or_else(|| Error::WrongPath {
+                path: filename.as_ref().to_path_buf(),
+            })?,
+        ) {
+            if object.size != src_len {
+                Ok(true)
+            } else if file_crc32c(path_src)? != object.crc32c_decode() {
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        } else {
+            // cloud-sync-rs don't provide semantic errors, so on any error we assume here that file does not exists in a bucket
+            Ok(true)
+        }
     }
 }
 
-#[cfg(test)]
-#[macro_use]
-extern crate arrayref;
+pub(crate) trait CrcDecode {
+    fn crc32c_decode(&self) -> u32;
+}
+
+impl CrcDecode for Object {
+    fn crc32c_decode(&self) -> u32 {
+        let crc32c_vec = base64::decode(&self.crc32c).unwrap();
+        u32::from_be_bytes(*array_ref!(crc32c_vec, 0, 4))
+    }
+}
+
+pub(crate) fn file_crc32c(file: impl AsRef<Path>) -> Result<u32, std::io::Error> {
+    let file = File::open(file).unwrap();
+    let mut reader = BufReader::new(file);
+    let mut crc = 0u32;
+    loop {
+        let len = {
+            let buffer = reader.fill_buf()?;
+            crc = crc32c::crc32c_append(crc, buffer);
+            buffer.len()
+        };
+        if len == 0 {
+            break;
+        }
+        reader.consume(len);
+    }
+    Ok(crc)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use cloud_storage::object::Object;
     use std::fs::{create_dir, remove_dir_all, File};
-    use std::io::Read;
     use std::io::Write;
     use tempdir::TempDir;
 
@@ -210,14 +287,18 @@ mod tests {
         let prefix = "local_file_upload";
         init(prefix);
         let populated = PopulatedDir::new().unwrap();
-        Sync::copy_local_file_to_gcs(
+        let sync = Sync::new(false);
+        sync.copy_local_file_to_gcs(
             &populated.somefile,
             BUCKET,
             &PathBuf::from(format!("{}/somefile-renamed", prefix)),
         )
         .unwrap();
         let object = Object::read(BUCKET, &format!("{}/somefile-renamed", prefix)).unwrap();
-        assert_eq!(file_crc32c(&populated.somefile), object.crc32c_decode());
+        assert_eq!(
+            file_crc32c(&populated.somefile).unwrap(),
+            object.crc32c_decode()
+        );
         populated.remove().unwrap();
         clear_bucket(prefix).unwrap();
     }
@@ -227,7 +308,10 @@ mod tests {
         let prefix = "local_dir_upload";
         init(prefix);
         let populated = PopulatedDir::new().unwrap();
-        Sync::copy_local_dir_to_gcs(populated.tempdir.path(), BUCKET, &PathBuf::from(prefix))
+        let sync = Sync::new(false);
+        sync.copy_local_dir_to_gcs(populated.tempdir.path(), BUCKET, &PathBuf::from(prefix))
+            .unwrap();
+        sync.copy_local_dir_to_gcs(populated.tempdir.path(), BUCKET, &PathBuf::from(prefix))
             .unwrap();
         populated.remove().unwrap();
         clear_bucket(prefix).unwrap();
@@ -244,13 +328,6 @@ mod tests {
             object.delete()?;
         }
         Ok(())
-    }
-
-    fn file_crc32c(file: &PathBuf) -> u32 {
-        let mut file = File::open(file).unwrap();
-        let mut buf = vec![];
-        file.read_to_end(&mut buf).unwrap();
-        crc32c::crc32c(&buf)
     }
 
     struct PopulatedDir {
@@ -282,17 +359,6 @@ mod tests {
         fn remove(self) -> Result<(), std::io::Error> {
             remove_dir_all(self.tempdir)?;
             Ok(())
-        }
-    }
-
-    trait CrcDecode {
-        fn crc32c_decode(&self) -> u32;
-    }
-
-    impl CrcDecode for Object {
-        fn crc32c_decode(&self) -> u32 {
-            let crc32c_vec = base64::decode(&self.crc32c).unwrap();
-            u32::from_be_bytes(*array_ref!(crc32c_vec, 0, 4))
         }
     }
 }

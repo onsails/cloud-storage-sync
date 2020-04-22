@@ -138,6 +138,7 @@ impl Sync {
         }
     }
 
+    /// Copies remote GCS bucket file or directory to another remote GCS bucket file or directory
     pub fn copy_gcs_to_gcs(
         bucket_src: &str,
         path_src: &str,

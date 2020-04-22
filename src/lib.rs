@@ -91,7 +91,7 @@ impl Source {
                 Sync::copy_gcs_to_gcs(bucket, path, bucket_dst, path_dst)
             }
             Source::Local(path) => {
-                sync.copy_local_to_gcs(path, bucket_dst, &PathBuf::from(path_dst))
+                sync.sync_local_to_gcs(path, bucket_dst, &PathBuf::from(path_dst))
             }
         }
     }
@@ -115,12 +115,10 @@ impl Sync {
     pub fn copy_local_to_local(path_src: &PathBuf, path_dst: &PathBuf) -> Result<(), Error> {
         unimplemented!()
     }
-    /**
-     * Copies local file or directory to GCS bucket
-     * if path_src is a file then the resulting object will be [bucket_dst]/[path_dst]/[filename]
-     * where [filename] is a string after the last "/" of the path_src
-     */
-    pub fn copy_local_to_gcs(
+    /// Syncs local file or directory to GCS bucket
+    /// if path_src is a file then the resulting object will be [bucket_dst]/[path_dst]/[filename]
+    /// where [filename] is a string after the last "/" of the path_src
+    pub fn sync_local_to_gcs(
         &self,
         path_src: impl AsRef<Path>,
         bucket_dst: &str,
@@ -128,14 +126,14 @@ impl Sync {
     ) -> Result<(), Error> {
         let path_buf = PathBuf::from(path_src.as_ref());
         if path_buf.is_dir() {
-            self.copy_local_dir_to_gcs(path_src, bucket_dst, path_dst)?;
+            self.sync_local_dir_to_gcs(path_src, bucket_dst, path_dst)?;
             Ok(())
         } else {
             let filename = path_buf.file_name().ok_or_else(|| Error::Other {
                 message: "path_src is not a file, should never happen, please report an issue",
             })?;
             let path_dst = path_dst.as_ref().join(filename);
-            self.copy_local_file_to_gcs(path_src, bucket_dst, path_dst)?;
+            self.sync_local_file_to_gcs(path_src, bucket_dst, path_dst)?;
             Ok(())
         }
     }
@@ -153,12 +151,10 @@ impl Sync {
         Ok(())
     }
 
-    /**
-     * Copies local directory to gcs bucket
-     * the resulting filenames will be [path_dst]/[filename]
-     * where [filename] is path relative to the path_src
-     */
-    pub fn copy_local_dir_to_gcs(
+    /// Syncs local directory to gcs bucket
+    /// the resulting filenames will be [path_dst]/[filename]
+    /// where [filename] is path relative to the path_src
+    pub fn sync_local_dir_to_gcs(
         &self,
         path_src: impl AsRef<Path>,
         bucket: &str,
@@ -169,18 +165,16 @@ impl Sync {
             let entry_path = entry.path();
             let path_dst = path_dst.as_ref().join(entry.file_name());
             if entry_path.is_dir() {
-                self.copy_local_dir_to_gcs(&entry_path, bucket, &path_dst)?;
+                self.sync_local_dir_to_gcs(&entry_path, bucket, &path_dst)?;
             } else {
-                self.copy_local_file_to_gcs(&entry_path, bucket, &path_dst)?;
+                self.sync_local_file_to_gcs(&entry_path, bucket, &path_dst)?;
             }
         }
         Ok(())
     }
 
-    /**
-     * Copies local file to gcs bucket
-     */
-    pub fn copy_local_file_to_gcs(
+    /// Syncs local file and remote object
+    pub fn sync_local_file_to_gcs(
         &self,
         path_src: impl AsRef<Path>,
         bucket: &str,
@@ -288,7 +282,7 @@ mod tests {
         init(prefix);
         let populated = PopulatedDir::new().unwrap();
         let sync = Sync::new(false);
-        sync.copy_local_file_to_gcs(
+        sync.sync_local_file_to_gcs(
             &populated.somefile,
             BUCKET,
             &PathBuf::from(format!("{}/somefile-renamed", prefix)),
@@ -309,9 +303,9 @@ mod tests {
         init(prefix);
         let populated = PopulatedDir::new().unwrap();
         let sync = Sync::new(false);
-        sync.copy_local_dir_to_gcs(populated.tempdir.path(), BUCKET, &PathBuf::from(prefix))
+        sync.sync_local_dir_to_gcs(populated.tempdir.path(), BUCKET, &PathBuf::from(prefix))
             .unwrap();
-        sync.copy_local_dir_to_gcs(populated.tempdir.path(), BUCKET, &PathBuf::from(prefix))
+        sync.sync_local_dir_to_gcs(populated.tempdir.path(), BUCKET, &PathBuf::from(prefix))
             .unwrap();
         populated.remove().unwrap();
         clear_bucket(prefix).unwrap();

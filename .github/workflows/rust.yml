@@ -32,9 +32,10 @@ jobs:
         toolchain: nightly
     - name: Run cargo test
       uses: actions-rs/cargo@v1
+      env:
+        SERVICE_ACCOUNT: service-account.json
       with:
         command: test
         toolchain: nightly
-      env:
-        SERVICE_ACCOUNT: service-account.json
+
           

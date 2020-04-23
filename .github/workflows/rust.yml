@@ -16,7 +16,7 @@ jobs:
       shell: bash
       env:
         SERVICE_ACCOUNT_CONTENT: ${{secrets.SERVICE_ACCOUNT_CONTENT}}
-    - run: 'ls -lah'
+    - run: 'stat service-account.json'
       shell: bash
     - uses: actions/checkout@v2
     - name: Install latest nightly

@@ -352,6 +352,9 @@ impl<P: AsRef<Path>> ToStrWrap for P {
 }
 
 #[cfg(test)]
+#[macro_use] extern crate dotenv_codegen;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use cloud_storage::object::Object;
@@ -359,8 +362,6 @@ mod tests {
     use std::io::Read;
     use std::io::Write;
     use tempdir::TempDir;
-
-    const BUCKET: &str = "onsails-cloud-storage-sync";
 
     #[test]
     fn test_local_file_upload() {
@@ -370,11 +371,11 @@ mod tests {
         let sync = Sync::new(false);
         sync.sync_local_file_to_gcs(
             &populated.somefile,
-            BUCKET,
+            dotenv!("BUCKET"),
             &format!("{}/somefile-renamed", prefix),
         )
         .unwrap();
-        let object = Object::read(BUCKET, &format!("{}/somefile-renamed", prefix)).unwrap();
+        let object = Object::read(dotenv!("BUCKET"), &format!("{}/somefile-renamed", prefix)).unwrap();
         assert_eq!(
             file_crc32c(&populated.somefile).unwrap(),
             object.crc32c_decode()
@@ -390,15 +391,15 @@ mod tests {
         let populated = PopulatedDir::new().unwrap();
         let sync = Sync::new(false);
 
-        sync.sync_local_dir_to_gcs(populated.tempdir.path(), BUCKET, prefix)
+        sync.sync_local_dir_to_gcs(populated.tempdir.path(), dotenv!("BUCKET"), prefix)
             .unwrap();
-        sync.sync_local_dir_to_gcs(populated.tempdir.path(), BUCKET, prefix)
+        sync.sync_local_dir_to_gcs(populated.tempdir.path(), dotenv!("BUCKET"), prefix)
             .unwrap();
 
-        sync.sync_gcs_to_local(BUCKET, prefix, &populated.empty)
+        sync.sync_gcs_to_local(dotenv!("BUCKET"), prefix, &populated.empty)
             .unwrap();
         populated.assert_match(&populated.empty).unwrap();
-        sync.sync_gcs_to_local(BUCKET, prefix, &populated.empty)
+        sync.sync_gcs_to_local(dotenv!("BUCKET"), prefix, &populated.empty)
             .unwrap();
         populated.assert_match(&populated.empty).unwrap();
 
@@ -412,7 +413,7 @@ mod tests {
     }
 
     fn clear_bucket(prefix: &str) -> Result<(), cloud_storage::Error> {
-        let objects = Object::list_prefix(&BUCKET, prefix)?;
+        let objects = Object::list_prefix(dotenv!("BUCKET"), prefix)?;
         for object in objects {
             object.delete()?;
         }

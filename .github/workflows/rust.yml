@@ -32,6 +32,7 @@ jobs:
       uses: actions-rs/cargo@v1
       env:
         SERVICE_ACCOUNT: service-account.json
+        BUCKET: ${{secrets.BUCKET}}
       with:
         command: test
         toolchain: nightly

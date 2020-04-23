@@ -20,3 +20,5 @@ arrayref = "0.3.6"
 [dev-dependencies]
 env_logger = "0.7.1"
 tempdir = "0.3"
+dotenv = "0.15.0"
+dotenv_codegen = "0.15.0"

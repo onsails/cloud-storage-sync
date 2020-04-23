@@ -16,6 +16,8 @@ jobs:
       shell: bash
       env:
         SERVICE_ACCOUNT_CONTENT: ${{secrets.SERVICE_ACCOUNT_CONTENT}}
+    - run: 'ls -lah'
+      shell: bash
     - uses: actions/checkout@v2
     - name: Install latest nightly
       uses: actions-rs/toolchain@v1

@@ -12,12 +12,6 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - run: 'echo "$SERVICE_ACCOUNT_CONTENT" > service-account.json'
-      shell: bash
-      env:
-        SERVICE_ACCOUNT_CONTENT: ${{secrets.SERVICE_ACCOUNT_CONTENT}}
-    - run: 'stat service-account.json'
-      shell: bash
     - uses: actions/checkout@v2
     - name: Install latest nightly
       uses: actions-rs/toolchain@v1
@@ -30,6 +24,10 @@ jobs:
       with:
         command: build
         toolchain: nightly
+    - run: 'echo "$SERVICE_ACCOUNT_CONTENT" > service-account.json'
+      shell: bash
+      env:
+        SERVICE_ACCOUNT_CONTENT: ${{secrets.SERVICE_ACCOUNT_CONTENT}}
     - name: Run cargo test
       uses: actions-rs/cargo@v1
       env:

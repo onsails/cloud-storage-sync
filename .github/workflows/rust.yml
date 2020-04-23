@@ -1,0 +1,36 @@
+name: Rust
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - run: 'echo "$SERVICE_ACCOUNT_CONTENT" > service-account.json'
+      shell: bash
+      env:
+        SERVICE_ACCOUNT_CONTENT: ${{secrets.SERVICE_ACCOUNT_CONTENT}}
+    - uses: actions/checkout@v2
+    - name: Install latest nightly
+      uses: actions-rs/toolchain@v1
+      with:
+          toolchain: nightly
+          override: true
+          components: rustfmt, clippy
+    - name: Run cargo check
+      uses: actions-rs/cargo@v1
+      with:
+        command: build --verbose
+    - name: Run cargo check
+      uses: actions-rs/cargo@v1
+      with:
+        command: test --verbose
+      env:
+        SERVICE_ACCOUNT: service-account.json
+          

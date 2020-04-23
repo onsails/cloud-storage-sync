@@ -352,9 +352,6 @@ impl<P: AsRef<Path>> ToStrWrap for P {
 }
 
 #[cfg(test)]
-#[macro_use] extern crate dotenv_codegen;
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use cloud_storage::object::Object;
@@ -371,11 +368,11 @@ mod tests {
         let sync = Sync::new(false);
         sync.sync_local_file_to_gcs(
             &populated.somefile,
-            dotenv!("BUCKET"),
+            &env_bucket(),
             &format!("{}/somefile-renamed", prefix),
         )
         .unwrap();
-        let object = Object::read(dotenv!("BUCKET"), &format!("{}/somefile-renamed", prefix)).unwrap();
+        let object = Object::read(&env_bucket(), &format!("{}/somefile-renamed", prefix)).unwrap();
         assert_eq!(
             file_crc32c(&populated.somefile).unwrap(),
             object.crc32c_decode()
@@ -391,15 +388,15 @@ mod tests {
         let populated = PopulatedDir::new().unwrap();
         let sync = Sync::new(false);
 
-        sync.sync_local_dir_to_gcs(populated.tempdir.path(), dotenv!("BUCKET"), prefix)
+        sync.sync_local_dir_to_gcs(populated.tempdir.path(), &env_bucket(), prefix)
             .unwrap();
-        sync.sync_local_dir_to_gcs(populated.tempdir.path(), dotenv!("BUCKET"), prefix)
+        sync.sync_local_dir_to_gcs(populated.tempdir.path(), &env_bucket(), prefix)
             .unwrap();
 
-        sync.sync_gcs_to_local(dotenv!("BUCKET"), prefix, &populated.empty)
+        sync.sync_gcs_to_local(&env_bucket(), prefix, &populated.empty)
             .unwrap();
         populated.assert_match(&populated.empty).unwrap();
-        sync.sync_gcs_to_local(dotenv!("BUCKET"), prefix, &populated.empty)
+        sync.sync_gcs_to_local(&env_bucket(), prefix, &populated.empty)
             .unwrap();
         populated.assert_match(&populated.empty).unwrap();
 
@@ -413,11 +410,15 @@ mod tests {
     }
 
     fn clear_bucket(prefix: &str) -> Result<(), cloud_storage::Error> {
-        let objects = Object::list_prefix(dotenv!("BUCKET"), prefix)?;
+        let objects = Object::list_prefix(&env_bucket(), prefix)?;
         for object in objects {
             object.delete()?;
         }
         Ok(())
+    }
+
+    fn env_bucket() -> String {
+        dotenv::var("BUCKET").unwrap()
     }
 
     struct PopulatedDir {
@@ -469,6 +470,7 @@ mod tests {
             path: impl AsRef<Path>,
             content: &str,
         ) -> Result<()> {
+            dotenv::dotenv().ok();
             let path = in_dir.as_ref().join(path.as_ref());
             let mut file = File::open(&path).context(Io { path: &path })?;
             let mut contents = String::new();

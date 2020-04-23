@@ -150,6 +150,7 @@ impl Sync {
         }
         Ok(())
     }
+    
     /// Syncs local file or directory to GCS bucket
     /// if path_src is a file then the resulting object will be [bucket_dst]/[path_dst]/[filename]
     /// where [filename] is a string after the last "/" of the path_src

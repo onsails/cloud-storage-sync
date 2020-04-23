@@ -29,10 +29,12 @@ jobs:
       uses: actions-rs/cargo@v1
       with:
         command: build
+        toolchain: nightly
     - name: Run cargo test
       uses: actions-rs/cargo@v1
       with:
         command: test
+        toolchain: nightly
       env:
         SERVICE_ACCOUNT: service-account.json
           

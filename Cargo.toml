@@ -8,7 +8,7 @@ edition = "2018"
 
 [dependencies]
 cloud-storage = { git = "https://github.com/onsails/cloud-storage-rs" }
-snafu = "0.6.6"
+snafu = { version = "0.6.6", features = ["backtraces"] }
 mime_guess = "2.0.3"
 mime = "0.3.16"
 reqwest = "0.10.4"

@@ -74,9 +74,7 @@ impl Source {
             Source::GCS { bucket, path } => {
                 Sync::copy_gcs_to_gcs(bucket, path, bucket_dst, path_dst)
             }
-            Source::Local(path) => {
-                sync.sync_local_to_gcs(path, bucket_dst, &PathBuf::from(path_dst))
-            }
+            Source::Local(path) => sync.sync_local_to_gcs(path, bucket_dst, path_dst),
         }
     }
 }
@@ -150,7 +148,6 @@ impl Sync {
         }
         Ok(())
     }
-    
     /// Syncs local file or directory to GCS bucket
     /// if path_src is a file then the resulting object will be [bucket_dst]/[path_dst]/[filename]
     /// where [filename] is a string after the last "/" of the path_src
@@ -158,7 +155,7 @@ impl Sync {
         &self,
         path_src: impl AsRef<Path>,
         bucket_dst: &str,
-        path_dst: impl AsRef<Path>,
+        path_dst: &str,
     ) -> Result<(), Error> {
         let path_buf = PathBuf::from(path_src.as_ref());
         if path_buf.is_dir() {
@@ -168,8 +165,9 @@ impl Sync {
             let filename = path_buf.file_name().ok_or_else(|| Error::Other {
                 message: "path_src is not a file, should never happen, please report an issue",
             })?;
-            let path_dst = path_dst.as_ref().join(filename);
-            self.sync_local_file_to_gcs(path_src, bucket_dst, path_dst)?;
+            let path_dst = PathBuf::from(path_dst).join(filename);
+            let gcs_path_dst = path_dst.to_str_wrap()?;
+            self.sync_local_file_to_gcs(path_src, bucket_dst, gcs_path_dst)?;
             Ok(())
         }
     }
@@ -195,7 +193,7 @@ impl Sync {
         &self,
         path_src: impl AsRef<Path>,
         bucket: &str,
-        path_dst: impl AsRef<Path>,
+        path_dst: &str,
     ) -> Result<()> {
         for entry in fs::read_dir(path_src.as_ref()).context(Io {
             path: path_src.as_ref(),
@@ -204,11 +202,12 @@ impl Sync {
                 path: path_src.as_ref(),
             })?;
             let entry_path = entry.path();
-            let path_dst = path_dst.as_ref().join(entry.file_name());
+            let path_dst = PathBuf::from(path_dst).join(entry.file_name());
+            let path_dst = path_dst.to_str_wrap()?;
             if entry_path.is_dir() {
-                self.sync_local_dir_to_gcs(&entry_path, bucket, &path_dst)?;
+                self.sync_local_dir_to_gcs(&entry_path, bucket, path_dst)?;
             } else {
-                self.sync_local_file_to_gcs(&entry_path, bucket, &path_dst)?;
+                self.sync_local_file_to_gcs(&entry_path, bucket, path_dst)?;
             }
         }
         Ok(())
@@ -219,9 +218,9 @@ impl Sync {
         &self,
         path_src: impl AsRef<Path>,
         bucket: &str,
-        filename: impl AsRef<Path>,
+        filename: &str,
     ) -> Result<()> {
-        if !self.should_upload_local(path_src.as_ref(), bucket, filename.as_ref())? {
+        if !self.should_upload_local(path_src.as_ref(), bucket, filename)? {
             log::trace!("Skip {:?}", path_src.as_ref());
             Ok(())
         } else {
@@ -229,7 +228,7 @@ impl Sync {
                 "Copy {:?} to gs://{}/{}",
                 path_src.as_ref(),
                 bucket,
-                filename.as_ref().display()
+                filename,
             );
             let file_src = File::open(path_src.as_ref()).context(Io {
                 path: path_src.as_ref(),
@@ -242,10 +241,6 @@ impl Sync {
             let mime_type =
                 mime_guess::from_path(path_src).first_or(mime::APPLICATION_OCTET_STREAM);
             let mime_type_str = mime_type.essence_str();
-            let filename_path = filename.as_ref();
-            let filename = filename_path.to_str().ok_or_else(|| Error::WrongPath {
-                path: filename_path.to_path_buf(),
-            })?;
             Object::create_streamed(bucket, reader, length, filename, mime_type_str)?;
             Ok(())
         }
@@ -284,7 +279,7 @@ impl Sync {
         &self,
         path_src: impl AsRef<Path>,
         bucket: &str,
-        filename: impl AsRef<Path>,
+        filename: &str,
     ) -> Result<bool> {
         if self.force_overwrite {
             return Ok(true);
@@ -297,12 +292,7 @@ impl Sync {
                 path: path_src.as_ref(),
             })?
             .len();
-        if let Ok(object) = Object::read(
-            bucket,
-            filename.as_ref().to_str().ok_or_else(|| Error::WrongPath {
-                path: filename.as_ref().to_path_buf(),
-            })?,
-        ) {
+        if let Ok(object) = Object::read(bucket, filename) {
             if object.size != src_len {
                 Ok(true)
             } else if file_crc32c(path_src.as_ref()).context(Io {
@@ -349,14 +339,26 @@ pub(crate) fn file_crc32c(file: impl AsRef<Path>) -> Result<u32, std::io::Error>
     Ok(crc)
 }
 
+trait ToStrWrap {
+    fn to_str_wrap(&self) -> Result<&str>;
+}
+
+impl<P: AsRef<Path>> ToStrWrap for P {
+    fn to_str_wrap(&self) -> Result<&str> {
+        self.as_ref().to_str().ok_or_else(|| Error::Other {
+            message: "Can't convert Path to &str, should never happen, please report an issue",
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use cloud_storage::object::Object;
     use std::fs::{create_dir, remove_dir_all, File};
+    use std::io::Read;
     use std::io::Write;
     use tempdir::TempDir;
-    use std::io::Read;
 
     const BUCKET: &str = "onsails-cloud-storage-sync";
 
@@ -369,7 +371,7 @@ mod tests {
         sync.sync_local_file_to_gcs(
             &populated.somefile,
             BUCKET,
-            &PathBuf::from(format!("{}/somefile-renamed", prefix)),
+            &format!("{}/somefile-renamed", prefix),
         )
         .unwrap();
         let object = Object::read(BUCKET, &format!("{}/somefile-renamed", prefix)).unwrap();
@@ -388,9 +390,9 @@ mod tests {
         let populated = PopulatedDir::new().unwrap();
         let sync = Sync::new(false);
 
-        sync.sync_local_dir_to_gcs(populated.tempdir.path(), BUCKET, &PathBuf::from(prefix))
+        sync.sync_local_dir_to_gcs(populated.tempdir.path(), BUCKET, prefix)
             .unwrap();
-        sync.sync_local_dir_to_gcs(populated.tempdir.path(), BUCKET, &PathBuf::from(prefix))
+        sync.sync_local_dir_to_gcs(populated.tempdir.path(), BUCKET, prefix)
             .unwrap();
 
         sync.sync_gcs_to_local(BUCKET, prefix, &populated.empty)
@@ -460,11 +462,17 @@ mod tests {
             Ok(())
         }
 
-        fn assert_file_match(&self, in_dir: impl AsRef<Path>, path: impl AsRef<Path>, content: &str) -> Result<()> {
+        fn assert_file_match(
+            &self,
+            in_dir: impl AsRef<Path>,
+            path: impl AsRef<Path>,
+            content: &str,
+        ) -> Result<()> {
             let path = in_dir.as_ref().join(path.as_ref());
             let mut file = File::open(&path).context(Io { path: &path })?;
             let mut contents = String::new();
-            file.read_to_string(&mut contents).context(Io { path: &path })?;
+            file.read_to_string(&mut contents)
+                .context(Io { path: &path })?;
             assert_eq!(contents, content);
             Ok(())
         }

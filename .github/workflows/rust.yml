@@ -30,12 +30,6 @@ jobs:
       with:
         command: build
         toolchain: nightly
-    - name: Cache target
-      id: cache-target
-      uses: actions/cache@v1
-      with:
-        path: target
-        key: ${{ runner.os }}-target
     - name: Run cargo test
       uses: actions-rs/cargo@v1
       env:

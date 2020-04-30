@@ -2,6 +2,11 @@
 name = "cloud-storage-sync"
 version = "0.0.1"
 authors = ["Andrey Kuznetsov <fear@loathing.in>"]
+license-file = "license.txt"
+description = "Embedded rsync-like local files and Google Cloud Storage buckets"
+homepage = "https://github.com/onsails/cloud-storage-sync"
+repository = "https://github.com/onsails/cloud-storage-sync"
+documentation = "https://docs.rs/cloud-storage-sync"
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

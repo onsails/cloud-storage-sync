@@ -1,4 +1,7 @@
 # cloud-storage-sync
+
+![docs](https://docs.rs/cloud-storage-sync/badge.svg)
+
 Library to sync files to, from and between Google Cloud Storage buckets
 
 This project depends on [cloud-storage-rs](https://github.com/ThouCheese/cloud-storage-rs.git) crate.

@@ -110,8 +110,9 @@ dependencies = [
 
 [[package]]
 name = "cloud-storage"
-version = "0.3.6"
-source = "git+https://github.com/onsails/cloud-storage-rs#d46ef3f30908efdc92f9a0fd73820c2cd73fb4f0"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d068b9d82b3fd833de4d92156d43b2c727abcb9f514eb12e8fa1c91375b3fa2c"
 dependencies = [
  "base64 0.11.0",
  "chrono",

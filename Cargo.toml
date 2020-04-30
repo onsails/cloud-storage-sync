@@ -8,7 +8,7 @@ homepage = "https://github.com/onsails/cloud-storage-sync"
 repository = "https://github.com/onsails/cloud-storage-sync"
 documentation = "https://docs.rs/cloud-storage-sync"
 categories = ["filesystem"]
-keywords = ["google-cloud-storage", "google", "sync", "rsync", "google-cloud-platform", "google-cloud"]
+keywords = ["gcs", "sync", "rsync", "google-cloud"]
 edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

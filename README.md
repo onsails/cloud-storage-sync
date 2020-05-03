@@ -1,6 +1,6 @@
 # cloud-storage-sync
 
-![docs](https://docs.rs/cloud-storage-sync/badge.svg)
+[![docs](https://docs.rs/cloud-storage-sync/badge.svg)](https://docs.rs/cloud-storage-sync)
 
 Library to sync files to, from and between Google Cloud Storage buckets
 

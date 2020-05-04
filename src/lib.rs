@@ -55,7 +55,7 @@ impl<'a> Source<'a> {
     }
 
     /// Syncs to a local path
-    pub fn sync_to_local(&self, path_dst: &PathBuf, sync: &Sync) -> Result<(), Error> {
+    pub fn sync_to_local(&self, path_dst: impl AsRef<Path>, sync: &Sync) -> Result<(), Error> {
         match self {
             Source::GCS { bucket, path } => sync.sync_gcs_to_local(bucket, path, path_dst),
             Source::Local(path) => Sync::copy_local_to_local(path, path_dst),
@@ -89,7 +89,10 @@ impl Sync {
 
     #[doc(hidden)]
     #[allow(unused_variables)]
-    pub fn copy_local_to_local(path_src: &PathBuf, path_dst: &PathBuf) -> Result<(), Error> {
+    pub fn copy_local_to_local(
+        path_src: impl AsRef<Path>,
+        path_dst: impl AsRef<Path>,
+    ) -> Result<(), Error> {
         unimplemented!()
     }
 

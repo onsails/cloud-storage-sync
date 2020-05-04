@@ -35,23 +35,17 @@ pub enum Error {
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
-pub enum Source {
-    GCS {
-        bucket: &'static str,
-        path: &'static str,
-    },
+pub enum Source<'a> {
+    GCS { bucket: &'a str, path: &'a str },
     Local(PathBuf),
 }
 
-pub enum Destination {
-    GCS {
-        bucket: &'static str,
-        path: &'static str,
-    },
+pub enum Destination<'a> {
+    GCS { bucket: &'a str, path: &'a str },
     Local(PathBuf),
 }
 
-impl Source {
+impl<'a> Source<'a> {
     /// Syncs to a destination
     pub fn sync_to(&self, dst: Destination, sync: &Sync) -> Result<(), Error> {
         match dst {

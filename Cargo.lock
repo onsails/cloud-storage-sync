@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "cloud-storage-sync"
-version = "0.0.4-alpha.0"
+version = "0.0.4"
 dependencies = [
  "arrayref",
  "base64 0.12.0",

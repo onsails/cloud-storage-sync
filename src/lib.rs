@@ -35,11 +35,13 @@ pub enum Error {
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
+#[derive(Debug)]
 pub enum Source {
     GCS { bucket: String, path: String },
     Local(PathBuf),
 }
 
+#[derive(Debug)]
 pub enum Destination {
     GCS { bucket: String, path: String },
     Local(PathBuf),
@@ -73,6 +75,7 @@ impl Source {
     }
 }
 
+#[derive(Debug)]
 pub struct Sync {
     force_overwrite: bool,
 }
@@ -103,6 +106,12 @@ impl Sync {
         path_src: &str,
         path_dst: impl AsRef<Path>,
     ) -> Result<()> {
+        log::trace!(
+            "Syncing bucket: {}, path: {} to local path: {:?}",
+            bucket_src,
+            path_src,
+            path_dst.as_ref()
+        );
         let objects_src = Object::list_prefix(bucket_src, path_src)?;
         for object_src in objects_src {
             let path = object_src

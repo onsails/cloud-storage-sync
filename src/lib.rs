@@ -149,7 +149,8 @@ impl Sync {
                 let mut writer = BufWriter::new(file_dst);
                 let url_src = object_src.download_url(60)?;
                 let mut response_src = reqwest::blocking::get(&url_src)?;
-                response_src.copy_to(&mut writer)?;
+                let copied = response_src.copy_to(&mut writer)?;
+                log::trace!("Copied {} bytes", copied);
             }
         }
         Ok(())
@@ -270,11 +271,13 @@ impl Sync {
             .len();
 
         if dst_len != object.size {
+            log::trace!("Size mismatch, src: {}, dst: {}", object.size, dst_len);
             Ok(true)
         } else if file_crc32c(path_dst.as_ref()).context(Io {
             path: path_dst.as_ref(),
         })? != object.crc32c_decode()
         {
+            log::trace!("Crc32c mismatch");
             Ok(true)
         } else {
             Ok(false)
@@ -300,11 +303,13 @@ impl Sync {
             .len();
         if let Ok(object) = Object::read(bucket, filename) {
             if object.size != src_len {
+                log::trace!("Size mismatch, src: {}, dst: {}", src_len, object.size);
                 Ok(true)
             } else if file_crc32c(path_src.as_ref()).context(Io {
                 path: path_src.as_ref(),
             })? != object.crc32c_decode()
             {
+                log::trace!("Crc32c mismatch");
                 Ok(true)
             } else {
                 Ok(false)
@@ -433,6 +438,7 @@ mod tests {
         pub dirpath: PathBuf,
         pub dirfile: PathBuf,
         pub empty: PathBuf,
+        pub dirfilecontents: String,
     }
 
     impl PopulatedDir {
@@ -446,7 +452,11 @@ mod tests {
             create_dir(&dirpath)?;
             let dirfilepath = dirpath.join("dirfile");
             let mut dirfile = File::create(&dirfilepath)?;
-            write!(&mut dirfile, "dirfilecontents")?;
+            let mut dirfilecontents = String::new();
+            for _ in 0..1_000_000 {
+                write!(&mut dirfile, "10_bytes_")?;
+                dirfilecontents.push_str("10_bytes_");
+            }
 
             let empty = tempdir.as_ref().join("empty");
             create_dir(&empty)?;
@@ -456,6 +466,7 @@ mod tests {
                 dirpath,
                 dirfile: dirfilepath,
                 empty,
+                dirfilecontents,
             })
         }
 
@@ -466,7 +477,7 @@ mod tests {
 
         fn assert_match(&self, path: impl AsRef<Path>) -> Result<()> {
             self.assert_file_match(&path, "somefile", "somefilecontents")?;
-            self.assert_file_match(&path, "somedir/dirfile", "dirfilecontents")?;
+            self.assert_file_match(&path, "somedir/dirfile", &self.dirfilecontents)?;
             Ok(())
         }
 

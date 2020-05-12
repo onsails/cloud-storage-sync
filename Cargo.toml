@@ -15,7 +15,7 @@ edition = "2018"
 
 [dependencies]
 cloud-storage = "0.3.7"
-snafu = { version = "0.6.7", features = ["backtraces"] }
+snafu = { version = "0.6.8", features = ["backtraces"] }
 mime_guess = "2.0.3"
 mime = "0.3.16"
 reqwest = "0.10.4"

@@ -2,7 +2,7 @@
 name = "cloud-storage-sync"
 version = "0.2.2"
 authors = ["Andrey Kuznetsov <fear@loathing.in>"]
-license-file = "license.txt"
+license-file = "LICENSE.txt"
 description = "Embedded rsync-like local files and Google Cloud Storage buckets"
 homepage = "https://github.com/onsails/cloud-storage-sync"
 repository = "https://github.com/onsails/cloud-storage-sync"

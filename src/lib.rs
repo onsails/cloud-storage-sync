@@ -423,7 +423,8 @@ mod tests {
     fn clear_bucket(prefix: &str) -> Result<(), cloud_storage::Error> {
         let objects = Object::list_prefix(&env_bucket(), prefix)?;
         for object in objects {
-            object.delete()?;
+            log::trace!("deleting gs://{}{}", &object.bucket, &object.name);
+            Object::delete(&object.bucket, &object.name)?;
         }
         Ok(())
     }

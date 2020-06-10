@@ -1,6 +1,6 @@
 [package]
 name = "cloud-storage-sync"
-version = "0.2.2-alpha.0"
+version = "0.2.2"
 authors = ["Andrey Kuznetsov <fear@loathing.in>"]
 license-file = "license.txt"
 description = "Embedded rsync-like local files and Google Cloud Storage buckets"

@@ -18,7 +18,7 @@ mime_guess = "2.0.3"
 mime = "0.3.16"
 reqwest = "0.10.4"
 log = "0.4.8"
-crc32c = "0.4"
+crc32c = "0.5"
 base64 = "0.12"
 arrayref = "0.3.6"
 

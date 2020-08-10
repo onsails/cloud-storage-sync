@@ -12,7 +12,7 @@ keywords = ["sync", "rsync", "google-cloud", "google", "cloud"]
 edition = "2018"
 
 [dependencies]
-cloud-storage = "0.4.0"
+cloud-storage = "0.5.2"
 snafu = { version = "0.6.8", features = ["backtraces"] }
 mime_guess = "2.0.3"
 mime = "0.3.16"

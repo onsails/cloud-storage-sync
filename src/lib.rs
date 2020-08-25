@@ -1,36 +1,22 @@
 #[macro_use]
 extern crate arrayref;
 
-use cloud_storage::object::Object;
-use cloud_storage::Error as CSError;
-use snafu::{Backtrace, ResultExt, Snafu};
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, BufWriter, Error as IoError};
-use std::path::{Path, PathBuf};
+pub mod error;
 
-#[derive(Debug, Snafu)]
-pub enum Error {
-    #[snafu(context(false))]
-    CloudStorage {
-        source: CSError,
-    },
-    #[snafu(display("IOError occured, path: {}: {}", "path", "source"))]
-    Io {
-        path: PathBuf,
-        source: IoError,
-        backtrace: Backtrace,
-    },
-    #[snafu(context(false))]
-    Reqwest {
-        source: reqwest::Error,
-    },
-    Other {
-        message: &'static str,
-    },
-    WrongPath {
-        path: PathBuf,
-    },
-}
+mod util;
+
+use crate::error::*;
+use crate::util::*;
+use cloud_storage::object::Object;
+use futures::future::{BoxFuture, FutureExt};
+use futures::stream::TryStreamExt;
+use snafu::{futures::TryStreamExt as SnafuTryStreamExt, ResultExt};
+use std::{
+    path::{Path, PathBuf},
+    pin::Pin,
+};
+use tokio::fs::{self, File};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -48,28 +34,43 @@ pub enum Destination {
 
 impl Source {
     /// Syncs to a destination
-    pub fn sync_to(&self, dst: Destination, sync: &Sync) -> Result<(), Error> {
+    ///
+    /// Returns actual downloads/uploads count
+    pub async fn sync_to(&self, dst: Destination, sync: &Sync) -> Result<usize, Error> {
         match dst {
-            Destination::GCS { bucket, path } => self.sync_to_gcs(&bucket, &path, sync),
-            Destination::Local(path) => self.sync_to_local(&path, sync),
+            Destination::GCS { bucket, path } => self.sync_to_gcs(&bucket, &path, sync).await,
+            Destination::Local(path) => self.sync_to_local(&path, sync).await,
         }
     }
 
     /// Syncs to a local path
-    pub fn sync_to_local(&self, path_dst: impl AsRef<Path>, sync: &Sync) -> Result<(), Error> {
+    ///
+    /// Returns actual downloads count
+    pub async fn sync_to_local(
+        &self,
+        path_dst: impl AsRef<Path>,
+        sync: &Sync,
+    ) -> Result<usize, Error> {
         match self {
-            Source::GCS { bucket, path } => sync.sync_gcs_to_local(bucket, path, path_dst),
-            Source::Local(path) => Sync::copy_local_to_local(path, path_dst),
+            Source::GCS { bucket, path } => sync.sync_gcs_to_local(bucket, path, path_dst).await,
+            Source::Local(path) => Sync::copy_local_to_local(path, path_dst).await,
         }
     }
 
     /// Syncs to GCS bucket
-    pub fn sync_to_gcs(&self, bucket_dst: &str, path_dst: &str, sync: &Sync) -> Result<(), Error> {
+    ///
+    /// Returns actual uploads count
+    pub async fn sync_to_gcs(
+        &self,
+        bucket_dst: &str,
+        path_dst: &str,
+        sync: &Sync,
+    ) -> Result<usize, Error> {
         match self {
             Source::GCS { bucket, path } => {
-                Sync::copy_gcs_to_gcs(bucket, path, bucket_dst, path_dst)
+                Sync::copy_gcs_to_gcs(bucket, path, bucket_dst, path_dst).await
             }
-            Source::Local(path) => sync.sync_local_to_gcs(path, bucket_dst, path_dst),
+            Source::Local(path) => sync.sync_local_to_gcs(path, bucket_dst, path_dst).await,
         }
     }
 }
@@ -91,105 +92,170 @@ impl Sync {
 
     #[doc(hidden)]
     #[allow(unused_variables)]
-    pub fn copy_local_to_local(
+    pub async fn copy_local_to_local(
         path_src: impl AsRef<Path>,
         path_dst: impl AsRef<Path>,
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         unimplemented!()
     }
 
     /// Syncs remote GCS bucket path to a local path
-    pub fn sync_gcs_to_local(
+    ///
+    /// Returns actual downloads count
+    pub async fn sync_gcs_to_local(
         &self,
         bucket_src: &str,
         path_src: &str,
         path_dst: impl AsRef<Path>,
-    ) -> Result<()> {
+    ) -> Result<usize> {
         log::trace!(
             "Syncing bucket: {}, path: {} to local path: {:?}",
             bucket_src,
             path_src,
             path_dst.as_ref()
         );
-        let objects_src = Object::list_prefix(bucket_src, path_src)?;
-        for object_src in objects_src {
-            let path = object_src
-                .name
-                .strip_prefix(path_src)
-                .ok_or_else(|| Error::Other {
+        let objects_src = Object::list_prefix(bucket_src, path_src).await?;
+        objects_src
+            .map_err(Error::from)
+            .try_fold(
+                (0usize, path_dst),
+                |(mut count, path_dst), object_srcs| async move {
+                    for object_src in object_srcs {
+                        let path = object_src.name.strip_prefix(path_src).ok_or_else(|| {
+                            Error::Other {
                     message:
                         "Failed to strip path prefix, should never happen, please report an issue",
-                })?;
-            let path = PathBuf::from(path);
-            let path = path.strip_prefix("/").unwrap_or_else(|_| path.as_path());
-            let path_dst = &path_dst.as_ref().join(path);
-
-            if let Some(dir_dst) = path_dst.parent() {
-                if dir_dst.exists() {
-                    if !dir_dst.is_dir() {
-                        fs::remove_file(dir_dst).context(Io { path: dir_dst })?;
-                    }
-                } else {
-                    log::trace!("Creating directory {:?}", &dir_dst);
-                    fs::create_dir_all(dir_dst).context(Io { path: dir_dst })?;
                 }
-            }
+                        })?;
+                        let path = PathBuf::from(path);
+                        let path = path.strip_prefix("/").unwrap_or_else(|_| path.as_path());
+                        let path_dst = &path_dst.as_ref().join(path);
 
-            if !self.should_download_remote(&object_src, path_dst)? {
-                log::trace!("Skip {:?}", object_src.name);
-            } else {
-                log::trace!(
-                    "Copy gs://{}/{} to {:?}",
-                    bucket_src,
-                    object_src.name,
-                    &path_dst,
-                );
-                let file_dst = File::create(path_dst).context(Io { path: path_dst })?;
-                let mut writer = BufWriter::new(file_dst);
-                let url_src = object_src.download_url(60)?;
-                let mut response_src = reqwest::blocking::get(&url_src)?;
-                let copied = response_src.copy_to(&mut writer)?;
-                log::trace!("Copied {} bytes", copied);
-            }
-        }
-        Ok(())
+                        if let Some(dir_dst) = path_dst.parent() {
+                            if FileUtil::exists(dir_dst).await {
+                                if !FileUtil::is_dir(dir_dst).await {
+                                    fs::remove_file(dir_dst)
+                                        .await
+                                        .context(Io { path: dir_dst })?;
+                                }
+                            } else {
+                                log::trace!("Creating directory {:?}", &dir_dst);
+                                fs::create_dir_all(dir_dst)
+                                    .await
+                                    .context(Io { path: dir_dst })?;
+                            }
+                        }
+
+                        if object_src.name.ends_with('/') {
+                            match path_dst.metadata() {
+                                Ok(md) if md.is_dir() => {}
+                                Ok(_) => {
+                                    std::fs::remove_file(path_dst)
+                                        .context(Io { path: path_dst })?;
+                                    std::fs::create_dir(path_dst).context(Io { path: path_dst })?;
+                                }
+                                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                                    std::fs::create_dir(path_dst).context(Io { path: path_dst })?;
+                                }
+                                Err(err) => {
+                                    Err(err).context(Io { path: path_dst })?;
+                                }
+                            };
+                        } else if !self.should_download_remote(&object_src, path_dst).await? {
+                            log::trace!("Skip {:?}", object_src.name);
+                        } else {
+                            log::trace!(
+                                "Copy gs://{}/{} to {:?}",
+                                bucket_src,
+                                object_src.name,
+                                &path_dst,
+                            );
+                            let file_dst = File::create(path_dst)
+                                .await
+                                .context(Io { path: path_dst })?;
+
+                            let url_src = object_src.download_url(60)?;
+                            let response_src = reqwest::get(&url_src).await?;
+
+                            let (mut file_dst, copied) = response_src
+                                .bytes_stream()
+                                .map_err(Error::from)
+                                .try_fold(
+                                    (file_dst, 0),
+                                    |(mut file_dst, copied), chunk| async move {
+                                        let copied = copied + chunk.len();
+                                        file_dst
+                                            .write_all(&chunk)
+                                            .await
+                                            .context(Io { path: path_dst })?;
+                                        Ok((file_dst, copied))
+                                    },
+                                )
+                                .await?;
+
+                            file_dst.sync_all().await.context(Io { path: path_dst })?;
+                            count += 1;
+
+                            log::trace!("Copied {} bytes", copied);
+                        }
+                    }
+                    Ok((count, path_dst))
+                },
+            )
+            .await
+            .map(|(count, _)| count)
     }
     /// Syncs local file or directory to GCS bucket
     /// if path_src is a file then the resulting object will be [bucket_dst]/[path_dst]/[filename]
     /// where [filename] is a string after the last "/" of the path_src
-    pub fn sync_local_to_gcs(
+    pub async fn sync_local_to_gcs(
         &self,
         path_src: impl AsRef<Path>,
         bucket_dst: &str,
         path_dst: &str,
-    ) -> Result<(), Error> {
+    ) -> Result<usize, Error> {
         let path_buf = PathBuf::from(path_src.as_ref());
         if path_buf.is_dir() {
-            self.sync_local_dir_to_gcs(path_src, bucket_dst, path_dst)?;
-            Ok(())
+            self.sync_local_dir_to_gcs(
+                path_src.to_str_wrap()?.to_owned(),
+                bucket_dst.to_owned(),
+                path_dst.to_owned(),
+            )
+            .await
         } else {
             let filename = path_buf.file_name().ok_or_else(|| Error::Other {
                 message: "path_src is not a file, should never happen, please report an issue",
             })?;
             let path_dst = PathBuf::from(path_dst).join(filename);
             let gcs_path_dst = path_dst.to_str_wrap()?;
-            self.sync_local_file_to_gcs(path_src, bucket_dst, gcs_path_dst)?;
-            Ok(())
+            self.sync_local_file_to_gcs(path_src, bucket_dst, gcs_path_dst)
+                .await
         }
     }
 
     /// Copies remote GCS bucket file or directory to another remote GCS bucket file or directory
-    pub fn copy_gcs_to_gcs(
+    pub async fn copy_gcs_to_gcs(
         bucket_src: &str,
         path_src: &str,
         bucket_dst: &str,
         path_dst: &str,
-    ) -> Result<(), Error> {
-        let objects_src = Object::list_prefix(bucket_src, path_src)?;
-        for object_src in objects_src {
-            object_src.copy(bucket_dst, path_dst)?;
-        }
-        Ok(())
+    ) -> Result<usize, Error> {
+        let objects_src = Object::list_prefix(bucket_src, path_src).await?;
+        objects_src
+            .map_err(Error::from)
+            .try_fold(
+                (0usize, bucket_dst, path_dst),
+                |(mut count, bucket_dst, path_dst), object_srcs| async move {
+                    for object_src in object_srcs {
+                        object_src.copy(bucket_dst, path_dst).await?;
+                        count += 1;
+                    }
+
+                    Ok((count, bucket_dst, path_dst))
+                },
+            )
+            .await
+            .map(|(count, ..)| count)
     }
 
     /// Syncs local directory to gcs bucket
@@ -197,38 +263,77 @@ impl Sync {
     /// where [filename] is path relative to the path_src
     pub fn sync_local_dir_to_gcs(
         &self,
-        path_src: impl AsRef<Path>,
-        bucket: &str,
-        path_dst: &str,
-    ) -> Result<()> {
-        for entry in fs::read_dir(path_src.as_ref()).context(Io {
-            path: path_src.as_ref(),
-        })? {
-            let entry = entry.context(Io {
-                path: path_src.as_ref(),
+        // path_src: impl AsRef<Path>,
+        path_src: String,
+        bucket: String,
+        path_dst: String,
+    ) -> BoxFuture<Result<usize>> {
+        async move {
+            let entries = fs::read_dir(&path_src).await.context(TokioIo {
+                path: path_src.clone(),
             })?;
-            let entry_path = entry.path();
-            let path_dst = PathBuf::from(path_dst).join(entry.file_name());
-            let path_dst = path_dst.to_str_wrap()?;
-            if entry_path.is_dir() {
-                self.sync_local_dir_to_gcs(&entry_path, bucket, path_dst)?;
+
+            let (entry_count, op_count) = entries
+                .context(Io { path: path_src })
+                .map_ok(|entry| (entry, bucket.clone(), path_dst.clone()))
+                .and_then(|(entry, bucket, path_dst)| async move {
+                    let entry_path = entry.path();
+                    let path_dst = PathBuf::from(&path_dst).join(entry.file_name());
+                    let path_dst = path_dst.to_str_wrap()?.to_owned();
+                    if entry_path.is_dir() {
+                        self.sync_local_dir_to_gcs(
+                            entry_path.to_str_wrap()?.to_owned(),
+                            bucket.clone(),
+                            path_dst.clone(),
+                        )
+                        .await
+                    } else {
+                        self.sync_local_file_to_gcs(&entry_path, &bucket, &path_dst)
+                            .await
+                    }
+                })
+                .try_fold(
+                    (0usize, 0usize),
+                    |(entry_count, op_count), entry_op_count| async move {
+                        Ok((entry_count + 1, op_count + entry_op_count))
+                    },
+                )
+                .await?;
+
+            if entry_count == 0 {
+                // empty directory, create an object/
+                let dir_object = format!("{}/", path_dst);
+                match Object::read(&bucket, &dir_object).await {
+                    Ok(_) => Ok(0),
+                    // hacky check because cloud_storage does not return better semantic
+                    Err(cloud_storage::Error::Other(msg)) if msg.contains("No such object") => {
+                        log::trace!("Creating gs://{}{}", bucket, dir_object);
+                        Object::create(&bucket, vec![], &dir_object, "").await?;
+                        Ok(1)
+                    }
+                    Err(e) => Err(Error::from(e)),
+                }
             } else {
-                self.sync_local_file_to_gcs(&entry_path, bucket, path_dst)?;
+                Ok(op_count)
             }
+            // .map(|(count, ..)| count);
         }
-        Ok(())
+        .boxed()
     }
 
     /// Syncs local file and remote object
-    pub fn sync_local_file_to_gcs(
+    pub async fn sync_local_file_to_gcs(
         &self,
         path_src: impl AsRef<Path>,
         bucket: &str,
         filename: &str,
-    ) -> Result<()> {
-        if !self.should_upload_local(path_src.as_ref(), bucket, filename)? {
+    ) -> Result<usize> {
+        if !self
+            .should_upload_local(path_src.as_ref(), bucket, filename)
+            .await?
+        {
             log::trace!("Skip {:?}", path_src.as_ref());
-            Ok(())
+            Ok(0)
         } else {
             log::trace!(
                 "Copy {:?} to gs://{}/{}",
@@ -236,23 +341,28 @@ impl Sync {
                 bucket,
                 filename,
             );
-            let file_src = File::open(path_src.as_ref()).context(Io {
+            let file_src = File::open(path_src.as_ref()).await.context(Io {
                 path: path_src.as_ref(),
             })?;
-            let metadata = file_src.metadata().context(Io {
+            let metadata = file_src.metadata().await.context(Io {
                 path: path_src.as_ref(),
             })?;
             let length = metadata.len();
-            let reader = BufReader::new(file_src);
+            let stream = ByteStream(Pin::new(Box::new(file_src)));
+            // let reader = BufReader::new(file_src);
             let mime_type =
                 mime_guess::from_path(path_src).first_or(mime::APPLICATION_OCTET_STREAM);
             let mime_type_str = mime_type.essence_str();
-            Object::create_streamed(bucket, reader, length, filename, mime_type_str)?;
-            Ok(())
+            Object::create_streamed(bucket, stream, length, filename, mime_type_str).await?;
+            Ok(1)
         }
     }
 
-    fn should_download_remote(&self, object: &Object, path_dst: impl AsRef<Path>) -> Result<bool> {
+    async fn should_download_remote(
+        &self,
+        object: &Object,
+        path_dst: impl AsRef<Path>,
+    ) -> Result<bool> {
         if self.force_overwrite {
             return Ok(true);
         }
@@ -272,7 +382,7 @@ impl Sync {
         if dst_len != object.size {
             log::trace!("Size mismatch, src: {}, dst: {}", object.size, dst_len);
             Ok(true)
-        } else if file_crc32c(path_dst.as_ref()).context(Io {
+        } else if file_crc32c(path_dst.as_ref()).await.context(Io {
             path: path_dst.as_ref(),
         })? != object.crc32c_decode()
         {
@@ -283,7 +393,7 @@ impl Sync {
         }
     }
 
-    fn should_upload_local(
+    async fn should_upload_local(
         &self,
         path_src: impl AsRef<Path>,
         bucket: &str,
@@ -300,11 +410,11 @@ impl Sync {
                 path: path_src.as_ref(),
             })?
             .len();
-        if let Ok(object) = Object::read(bucket, filename) {
+        if let Ok(object) = Object::read(bucket, filename).await {
             if object.size != src_len {
                 log::trace!("Size mismatch, src: {}, dst: {}", src_len, object.size);
                 Ok(true)
-            } else if file_crc32c(path_src.as_ref()).context(Io {
+            } else if file_crc32c(path_src.as_ref()).await.context(Io {
                 path: path_src.as_ref(),
             })? != object.crc32c_decode()
             {
@@ -331,20 +441,20 @@ impl CrcDecode for Object {
     }
 }
 
-pub(crate) fn file_crc32c(file: impl AsRef<Path>) -> Result<u32, std::io::Error> {
-    let file = File::open(file).unwrap();
-    let mut reader = BufReader::new(file);
+pub(crate) async fn file_crc32c(file: impl AsRef<Path>) -> Result<u32, std::io::Error> {
+    let mut file = File::open(file).await.unwrap();
+
     let mut crc = 0u32;
     loop {
         let len = {
-            let buffer = reader.fill_buf()?;
-            crc = crc32c::crc32c_append(crc, buffer);
+            let mut buffer = bytes::BytesMut::with_capacity(1024 * 8);
+            file.read_buf(&mut buffer).await?;
+            crc = crc32c::crc32c_append(crc, &buffer);
             buffer.len()
         };
         if len == 0 {
             break;
         }
-        reader.consume(len);
     }
     Ok(crc)
 }
@@ -370,61 +480,100 @@ mod tests {
     use std::io::Write;
     use tempdir::TempDir;
 
-    #[test]
-    fn test_local_file_upload() {
+    #[tokio::test]
+    async fn test_local_file_upload() {
         let prefix = "local_file_upload";
-        init(prefix);
+        init(prefix).await;
         let populated = PopulatedDir::new().unwrap();
         let sync = Sync::new(false);
-        sync.sync_local_file_to_gcs(
-            &populated.somefile,
-            &env_bucket(),
-            &format!("{}/somefile-renamed", prefix),
-        )
-        .unwrap();
-        let object = Object::read(&env_bucket(), &format!("{}/somefile-renamed", prefix)).unwrap();
+        for i in 0..2 {
+            let op_count = sync
+                .sync_local_file_to_gcs(
+                    &populated.somefile,
+                    &env_bucket(),
+                    &format!("{}/somefile-renamed", prefix),
+                )
+                .await
+                .unwrap();
+            if i == 0 {
+                assert_eq!(op_count, 1);
+            } else {
+                assert_eq!(op_count, 0);
+            }
+        }
+
+        let object = Object::read(&env_bucket(), &format!("{}/somefile-renamed", prefix))
+            .await
+            .unwrap();
         assert_eq!(
-            file_crc32c(&populated.somefile).unwrap(),
+            file_crc32c(&populated.somefile).await.unwrap(),
             object.crc32c_decode()
         );
         populated.remove().unwrap();
-        clear_bucket(prefix).unwrap();
+        clear_bucket(prefix).await.unwrap();
     }
 
-    #[test]
-    fn test_dir_sync() {
+    #[tokio::test]
+    async fn test_dir_sync() {
         let prefix = "local_dir_upload";
-        init(prefix);
+        init(prefix).await;
         let populated = PopulatedDir::new().unwrap();
         let sync = Sync::new(false);
 
-        sync.sync_local_dir_to_gcs(populated.tempdir.path(), &env_bucket(), prefix)
-            .unwrap();
-        sync.sync_local_dir_to_gcs(populated.tempdir.path(), &env_bucket(), prefix)
-            .unwrap();
+        for i in 0..2 {
+            log::info!("upload iter {}", i);
+            let op_count = sync
+                .sync_local_dir_to_gcs(
+                    populated.tempdir.to_str_wrap().unwrap().to_owned(),
+                    env_bucket(),
+                    prefix.to_owned(),
+                )
+                .await
+                .unwrap();
 
-        sync.sync_gcs_to_local(&env_bucket(), prefix, &populated.empty)
-            .unwrap();
-        populated.assert_match(&populated.empty).unwrap();
-        sync.sync_gcs_to_local(&env_bucket(), prefix, &populated.empty)
-            .unwrap();
-        populated.assert_match(&populated.empty).unwrap();
+            if i == 0 {
+                assert_eq!(op_count, 3);
+            } else {
+                assert_eq!(op_count, 0);
+            }
+        }
+
+        for i in 0..2 {
+            let op_count = sync
+                .sync_gcs_to_local(&env_bucket(), prefix, &populated.empty)
+                .await
+                .unwrap();
+            populated.assert_match(&populated.empty).unwrap();
+
+            if i == 0 {
+                // 2 op_count because we don't need to download an empty_dir/ object
+                assert_eq!(op_count, 2);
+            } else {
+                assert_eq!(op_count, 0);
+            }
+        }
 
         populated.remove().unwrap();
-        clear_bucket(prefix).unwrap();
+        clear_bucket(prefix).await.unwrap();
     }
 
-    fn init(prefix: &str) {
+    async fn init(prefix: &str) {
         let _ = env_logger::try_init();
-        clear_bucket(prefix).unwrap();
+        clear_bucket(prefix).await.unwrap();
     }
 
-    fn clear_bucket(prefix: &str) -> Result<(), cloud_storage::Error> {
-        let objects = Object::list_prefix(&env_bucket(), prefix)?;
-        for object in objects {
-            log::trace!("deleting gs://{}{}", &object.bucket, &object.name);
-            Object::delete(&object.bucket, &object.name)?;
-        }
+    async fn clear_bucket(prefix: &str) -> Result<(), cloud_storage::Error> {
+        let bucket = env_bucket();
+        let objects = Object::list_prefix(&bucket, prefix).await?;
+        objects
+            .try_for_each(|objects| async {
+                for object in objects {
+                    log::trace!("deleting gs://{}{}", &object.bucket, &object.name);
+                    Object::delete(&object.bucket, &object.name).await?;
+                }
+                Ok(())
+            })
+            .await?;
         Ok(())
     }
 
@@ -458,7 +607,7 @@ mod tests {
                 dirfilecontents.push_str("10_bytes_");
             }
 
-            let empty = tempdir.as_ref().join("empty");
+            let empty = tempdir.as_ref().join("empty_dir");
             create_dir(&empty)?;
             Ok(PopulatedDir {
                 tempdir,
@@ -478,6 +627,12 @@ mod tests {
         fn assert_match(&self, path: impl AsRef<Path>) -> Result<()> {
             self.assert_file_match(&path, "somefile", "somefilecontents")?;
             self.assert_file_match(&path, "somedir/dirfile", &self.dirfilecontents)?;
+            assert!(
+                std::fs::metadata(format!("{}/empty_dir", path.to_str_wrap().unwrap()))
+                    .expect("empty_dir should exist")
+                    .is_dir(),
+                "empty_dir should be a dir"
+            );
             Ok(())
         }
 

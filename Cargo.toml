@@ -12,17 +12,27 @@ keywords = ["sync", "rsync", "google-cloud", "google", "cloud"]
 edition = "2018"
 
 [dependencies]
-cloud-storage = "0.4.0"
-snafu = { version = "0.6.8", features = ["backtraces"] }
-mime_guess = "2.0.3"
-mime = "0.3.16"
-reqwest = "0.10.4"
-log = "0.4.8"
+cloud-storage = "0.6"
+futures = "0.3"
+futures-io = "0.3"
+tokio = { version = "0.2", features = [ "fs" ] }
+
+bytes = "0.5"
+
+snafu = { version = "0.6", features = ["backtraces", "futures"] }
+mime_guess = "2.0"
+mime = "0.3"
+reqwest = "0.10"
+log = "0.4"
 crc32c = "0.5"
 base64 = "0.12"
-arrayref = "0.3.6"
+arrayref = "0.3"
 
 [dev-dependencies]
 env_logger = "0.7.1"
 tempdir = "0.3"
 dotenv = "0.15.0"
+
+[dev-dependencies.tokio]
+version = "0.2"
+features = [ "rt-threaded", "macros" ]

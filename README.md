@@ -11,21 +11,25 @@ To access bucket you need to specify SERVICE_ACCOUNT environment variable which 
 let force_overwrite = false;
 let sync = Sync::new(force_overwrite);
 
-sync.sync_local_file_to_gcs(
-    "some_local_file",
-    BUCKET,
-    "prefix/somefile",
-)?;
+for i in 1..=2 {
+    let op_count = sync.sync_local_to_gcs(
+        "/some/local/file_or_dir", 
+        BUCKET,
+        "some/directory",
+    ).await?;
+    
+    if i == 2 {
+        assert_eq!(op_count, 0); // passes
+    }
 
-sync.sync_local_to_gcs(
-    "/some/local/file_or_dir", 
-    BUCKET,
-    "some/directory",
-)?;
-
-sync.sync_gcs_to_local(
-    BUCKET,
-    "myprefix",
-    "../some/directory"
-)?;
+    let op_count = sync.sync_gcs_to_local(
+        BUCKET,
+        "myprefix",
+        "../some/directory"
+    ).await?;
+    
+    if i == 2 {
+        assert_eq!(op_count, 0); // passes
+    }
+}
 ```

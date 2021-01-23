@@ -11,10 +11,7 @@ use cloud_storage::object::Object;
 use futures::future::{BoxFuture, FutureExt};
 use futures::stream::TryStreamExt;
 use snafu::{futures::TryStreamExt as SnafuTryStreamExt, ResultExt};
-use std::{
-    path::{Path, PathBuf},
-    pin::Pin,
-};
+use std::path::{Path, PathBuf};
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -114,14 +111,24 @@ impl Sync {
             path_src,
             path_dst.as_ref()
         );
-        let objects_src = Object::list_prefix(bucket_src, path_src).await?;
+        let objects_src =
+            Object::list_prefix(bucket_src, path_src)
+                .await
+                .context(CloudStorage {
+                    object: path_src.to_owned(),
+                    op: OpSource::pre(OpSource::ListPrefix),
+                })?;
         objects_src
-            .map_err(Error::from)
+            .context(CloudStorage {
+                object: path_src.to_owned(),
+                op: OpSource::ListPrefix,
+            })
+            // .map_err(Error::from)
             .try_fold(
                 (0usize, path_dst),
                 |(mut count, path_dst), object_srcs| async move {
                     for object_src in object_srcs {
-                        let path = object_src.name.strip_prefix(path_src).ok_or_else(|| {
+                        let path = object_src.name.strip_prefix(path_src).ok_or({
                             Error::Other {
                     message:
                         "Failed to strip path prefix, should never happen, please report an issue",
@@ -174,10 +181,13 @@ impl Sync {
                                 .await
                                 .context(Io { path: path_dst })?;
 
-                            let url_src = object_src.download_url(60)?;
+                            let url_src = object_src.download_url(60).context(CloudStorage {
+                                object: object_src.name.to_owned(),
+                                op: OpSource::DownloadUrl,
+                            })?;
                             let response_src = reqwest::get(&url_src).await?;
 
-                            let (mut file_dst, copied) = response_src
+                            let (file_dst, copied) = response_src
                                 .bytes_stream()
                                 .map_err(Error::from)
                                 .try_fold(
@@ -223,7 +233,7 @@ impl Sync {
             )
             .await
         } else {
-            let filename = path_buf.file_name().ok_or_else(|| Error::Other {
+            let filename = path_buf.file_name().ok_or(Error::Other {
                 message: "path_src is not a file, should never happen, please report an issue",
             })?;
             let path_dst = PathBuf::from(path_dst).join(filename);
@@ -240,14 +250,30 @@ impl Sync {
         bucket_dst: &str,
         path_dst: &str,
     ) -> Result<usize, Error> {
-        let objects_src = Object::list_prefix(bucket_src, path_src).await?;
+        let objects_src =
+            Object::list_prefix(bucket_src, path_src)
+                .await
+                .context(CloudStorage {
+                    object: path_src.to_owned(),
+                    op: OpSource::pre(OpSource::ListPrefix),
+                })?;
         objects_src
-            .map_err(Error::from)
+            .context(CloudStorage {
+                object: path_src.to_owned(),
+                op: OpSource::ListPrefix,
+            })
+            // .map_err(Error::from)
             .try_fold(
                 (0usize, bucket_dst, path_dst),
                 |(mut count, bucket_dst, path_dst), object_srcs| async move {
                     for object_src in object_srcs {
-                        object_src.copy(bucket_dst, path_dst).await?;
+                        object_src
+                            .copy(bucket_dst, path_dst)
+                            .await
+                            .context(CloudStorage {
+                                object: path_dst.to_owned(),
+                                op: OpSource::CopyObject,
+                            })?;
                         count += 1;
                     }
 
@@ -269,9 +295,12 @@ impl Sync {
         path_dst: String,
     ) -> BoxFuture<Result<usize>> {
         async move {
+            // get dir entries
             let entries = fs::read_dir(&path_src).await.context(TokioIo {
                 path: path_src.clone(),
             })?;
+            // convert to stream
+            let entries = tokio_stream::wrappers::ReadDirStream::new(entries);
 
             let (entry_count, op_count) = entries
                 .context(Io { path: path_src })
@@ -305,13 +334,22 @@ impl Sync {
                 let dir_object = format!("{}/", path_dst);
                 match Object::read(&bucket, &dir_object).await {
                     Ok(_) => Ok(0),
-                    // hacky check because cloud_storage does not return better semantic
-                    Err(cloud_storage::Error::Other(msg)) if msg.contains("No such object") => {
+                    Err(cloud_storage::Error::Google(response))
+                        if response.errors_has_reason(&cloud_storage::Reason::NotFound) =>
+                    {
                         log::trace!("Creating gs://{}{}", bucket, dir_object);
-                        Object::create(&bucket, vec![], &dir_object, "").await?;
+                        Object::create(&bucket, vec![], &dir_object, "")
+                            .await
+                            .context(CloudStorage {
+                                object: dir_object,
+                                op: OpSource::CreateObject,
+                            })?;
                         Ok(1)
                     }
-                    Err(e) => Err(Error::from(e)),
+                    Err(e) => Err(e).context(CloudStorage {
+                        object: dir_object,
+                        op: OpSource::ReadObject,
+                    }),
                 }
             } else {
                 Ok(op_count)
@@ -348,12 +386,18 @@ impl Sync {
                 path: path_src.as_ref(),
             })?;
             let length = metadata.len();
-            let stream = ByteStream(Pin::new(Box::new(file_src)));
+            // let stream = ByteStream(Pin::new(Box::new(file_src)));
+            let stream = tokio_util::io::ReaderStream::new(file_src);
             // let reader = BufReader::new(file_src);
             let mime_type =
                 mime_guess::from_path(path_src).first_or(mime::APPLICATION_OCTET_STREAM);
             let mime_type_str = mime_type.essence_str();
-            Object::create_streamed(bucket, stream, length, filename, mime_type_str).await?;
+            Object::create_streamed(bucket, stream, length, filename, mime_type_str)
+                .await
+                .context(CloudStorage {
+                    object: filename.to_owned(),
+                    op: OpSource::CreateObject,
+                })?;
             Ok(1)
         }
     }
@@ -465,7 +509,7 @@ trait ToStrWrap {
 
 impl<P: AsRef<Path>> ToStrWrap for P {
     fn to_str_wrap(&self) -> Result<&str> {
-        self.as_ref().to_str().ok_or_else(|| Error::Other {
+        self.as_ref().to_str().ok_or(Error::Other {
             message: "Can't convert Path to &str, should never happen, please report an issue",
         })
     }
@@ -478,83 +522,96 @@ mod tests {
     use std::fs::{create_dir, remove_dir_all, File};
     use std::io::Read;
     use std::io::Write;
+    use std::sync::Mutex;
     use tempdir::TempDir;
 
-    #[tokio::test]
-    async fn test_local_file_upload() {
-        let prefix = "local_file_upload";
-        init(prefix).await;
-        let populated = PopulatedDir::new().unwrap();
-        let sync = Sync::new(false);
-        for i in 0..2 {
-            let op_count = sync
-                .sync_local_file_to_gcs(
-                    &populated.somefile,
-                    &env_bucket(),
-                    &format!("{}/somefile-renamed", prefix),
-                )
-                .await
-                .unwrap();
-            if i == 0 {
-                assert_eq!(op_count, 1);
-            } else {
-                assert_eq!(op_count, 0);
-            }
-        }
-
-        let object = Object::read(&env_bucket(), &format!("{}/somefile-renamed", prefix))
-            .await
-            .unwrap();
-        assert_eq!(
-            file_crc32c(&populated.somefile).await.unwrap(),
-            object.crc32c_decode()
-        );
-        populated.remove().unwrap();
-        clear_bucket(prefix).await.unwrap();
+    lazy_static::lazy_static! {
+        // prevent error
+        // "dispatch dropped without returning error"
+        // caused by parallel tests
+        // https://github.com/ThouCheese/cloud-storage-rs/blob/master/src/lib.rs#L118
+        static ref RUNTIME: Mutex<tokio::runtime::Runtime> = Mutex::new(tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap());
     }
 
-    #[tokio::test]
-    async fn test_dir_sync() {
-        let prefix = "local_dir_upload";
-        init(prefix).await;
-        let populated = PopulatedDir::new().unwrap();
-        let sync = Sync::new(false);
+    #[test]
+    fn test_local_file_upload() {
+        RUNTIME.lock().unwrap().block_on(async {
+            let prefix = "local_file_upload";
+            init(prefix).await;
+            let populated = PopulatedDir::new().unwrap();
+            let sync = Sync::new(false);
+            for i in 0..2 {
+                let op_count = sync
+                    .sync_local_file_to_gcs(
+                        &populated.somefile,
+                        &env_bucket(),
+                        &format!("{}/somefile-renamed", prefix),
+                    )
+                    .await
+                    .unwrap();
+                if i == 0 {
+                    assert_eq!(op_count, 1);
+                } else {
+                    assert_eq!(op_count, 0);
+                }
+            }
 
-        for i in 0..2 {
-            log::info!("upload iter {}", i);
-            let op_count = sync
-                .sync_local_dir_to_gcs(
-                    populated.tempdir.to_str_wrap().unwrap().to_owned(),
-                    env_bucket(),
-                    prefix.to_owned(),
-                )
+            let object = Object::read(&env_bucket(), &format!("{}/somefile-renamed", prefix))
                 .await
                 .unwrap();
+            assert_eq!(
+                file_crc32c(&populated.somefile).await.unwrap(),
+                object.crc32c_decode()
+            );
+            populated.remove().unwrap();
+            clear_bucket(prefix).await.unwrap();
+        });
+    }
 
-            if i == 0 {
-                assert_eq!(op_count, 3);
-            } else {
-                assert_eq!(op_count, 0);
+    #[test]
+    fn test_dir_sync() {
+        RUNTIME.lock().unwrap().block_on(async {
+            let prefix = "local_dir_upload";
+            init(prefix).await;
+            let populated = PopulatedDir::new().unwrap();
+            let sync = Sync::new(false);
+
+            for i in 0..2 {
+                log::info!("upload iter {}", i);
+                let op_count = sync
+                    .sync_local_dir_to_gcs(
+                        populated.tempdir.to_str_wrap().unwrap().to_owned(),
+                        env_bucket(),
+                        prefix.to_owned(),
+                    )
+                    .await
+                    .unwrap();
+
+                if i == 0 {
+                    assert_eq!(op_count, 3);
+                } else {
+                    assert_eq!(op_count, 0);
+                }
             }
-        }
 
-        for i in 0..2 {
-            let op_count = sync
-                .sync_gcs_to_local(&env_bucket(), prefix, &populated.empty)
-                .await
-                .unwrap();
-            populated.assert_match(&populated.empty).unwrap();
+            for i in 0..2 {
+                let op_count = sync
+                    .sync_gcs_to_local(&env_bucket(), prefix, &populated.empty)
+                    .await
+                    .unwrap();
+                populated.assert_match(&populated.empty).unwrap();
 
-            if i == 0 {
-                // 2 op_count because we don't need to download an empty_dir/ object
-                assert_eq!(op_count, 2);
-            } else {
-                assert_eq!(op_count, 0);
+                if i == 0 {
+                    // 2 op_count because we don't need to download an empty_dir/ object
+                    assert_eq!(op_count, 2);
+                } else {
+                    assert_eq!(op_count, 0);
+                }
             }
-        }
 
-        populated.remove().unwrap();
-        clear_bucket(prefix).await.unwrap();
+            populated.remove().unwrap();
+            clear_bucket(prefix).await.unwrap();
+        });
     }
 
     async fn init(prefix: &str) {

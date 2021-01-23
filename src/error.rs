@@ -1,13 +1,30 @@
 use snafu::{Backtrace, Snafu};
 use std::path::PathBuf;
 
+#[derive(Debug, Clone)]
+pub enum OpSource {
+    CreateObject,
+    CopyObject,
+    ReadObject,
+    DownloadUrl,
+    ListPrefix,
+    Pre(Box<Self>),
+}
+
+impl OpSource {
+    pub fn pre(op: OpSource) -> Self {
+        Self::Pre(Box::new(op))
+    }
+}
+
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
-    #[snafu(context(false))]
     CloudStorage {
         #[snafu(source(from(cloud_storage::Error, Box::new)))]
         source: Box<cloud_storage::Error>,
+        object: String,
+        op: OpSource,
     },
     #[snafu(display("IOError occured, path: {}: {}", "path", "source"))]
     Io {

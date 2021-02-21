@@ -12,7 +12,7 @@ keywords = ["sync", "rsync", "google-cloud", "google", "cloud"]
 edition = "2018"
 
 [dependencies]
-cloud-storage = "0.7"
+cloud-storage = "0.8"
 futures = "0.3"
 futures-io = "0.3"
 tokio = { version = "1.2", features = [ "fs" ] }

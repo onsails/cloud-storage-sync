@@ -2,7 +2,8 @@ use crate::error::*;
 use crate::util::*;
 use crate::Result;
 use cloud_storage::object::Object;
-use futures::stream::TryStreamExt;
+use futures::stream::FuturesUnordered;
+use futures::stream::{StreamExt, TryStreamExt};
 use snafu::{futures::TryStreamExt as SnafuTryStreamExt, ResultExt};
 use std::path::{Path, PathBuf};
 use tokio::fs::{self, File};
@@ -11,6 +12,7 @@ use tokio::io::AsyncWriteExt;
 #[derive(Debug)]
 pub struct GCS2Local {
     pub(crate) force_overwrite: bool,
+    pub(crate) concurrency: usize,
 }
 
 impl GCS2Local {
@@ -21,14 +23,15 @@ impl GCS2Local {
         &self,
         bucket_src: &str,
         path_src: &str,
-        path_dst: impl AsRef<Path>,
+        dst_dir: impl AsRef<Path>,
     ) -> Result<usize> {
         log::trace!(
             "Syncing bucket: {}, path: {} to local path: {:?}",
             bucket_src,
             path_src,
-            path_dst.as_ref()
+            dst_dir.as_ref()
         );
+        let dst_dir = dst_dir.as_ref();
         let objects_src =
             Object::list_prefix(bucket_src, path_src)
                 .await
@@ -43,43 +46,75 @@ impl GCS2Local {
             })
             // .map_err(Error::from)
             .try_fold(
-                (0usize, path_dst),
-                |(mut count, path_dst), object_srcs| async move {
+                (0usize, dst_dir),
+                |(mut count, dst_dir), object_srcs| async move {
+                    let mut jobs_pool = FuturesUnordered::new();
+
                     for object_src in object_srcs {
-                        count += self
-                            .download_object(bucket_src, path_src, path_dst.as_ref(), object_src)
-                            .await?;
+                        if jobs_pool.len() == self.concurrency {
+                            // unwrap because it's not empty
+                            count += jobs_pool.next().await.unwrap()?;
+                        }
+
+                        let strip_prefix = if path_src.ends_with('/') {
+                            path_src.to_owned()
+                        } else {
+                            format!("{}/", path_src)
+                        };
+                        let stripped_object_name =
+                            object_src.name.strip_prefix(&strip_prefix).ok_or({
+                                Error::Other {
+                message: "Failed to strip path prefix, should never happen, please report an issue",
+            }
+                            })?;
+                        let path_dst = dst_dir.join(stripped_object_name);
+
+                        Self::create_parent_dirs(self.force_overwrite, &path_dst).await?;
+
+                        if object_src.name.ends_with('/') {
+                            let created =
+                                Self::maybe_create_dir(self.force_overwrite, &path_dst).await?;
+                            if let Some(created) = created {
+                                log::trace!("Created dir {:?}", created.as_os_str());
+                            }
+                            continue;
+                        }
+
+                        let path_dst = path_dst.to_str().expect("valid utf8 file name").to_owned();
+
+                        let job = Self::download_object(
+                            self.force_overwrite,
+                            bucket_src,
+                            path_dst,
+                            object_src,
+                        );
+
+                        jobs_pool.push(job);
                     }
-                    Ok((count, path_dst))
+                    while let Some(job) = jobs_pool.next().await {
+                        count += job?;
+                    }
+
+                    Ok((count, dst_dir))
                 },
             )
             .await
             .map(|(count, _)| count)
     }
 
-    async fn download_object(
-        &self,
-        bucket_src: &str,
-        path_src: &str,
-        path_dst: impl AsRef<Path>,
-        object_src: Object,
-    ) -> Result<usize> {
-        let mut count = 0;
-        let path = object_src.name.strip_prefix(path_src).ok_or({
-            Error::Other {
-                message: "Failed to strip path prefix, should never happen, please report an issue",
-            }
-        })?;
-        let path = PathBuf::from(path);
-        let path = path.strip_prefix("/").unwrap_or_else(|_| path.as_path());
-        let path_dst = &path_dst.as_ref().join(path);
+    async fn create_parent_dirs(force_overwrite: bool, path_dst: impl AsRef<Path>) -> Result<()> {
+        let path_dst = PathBuf::from(path_dst.as_ref());
 
         if let Some(dir_dst) = path_dst.parent() {
             if FileUtil::exists(dir_dst).await {
                 if !FileUtil::is_dir(dir_dst).await {
-                    fs::remove_file(dir_dst)
-                        .await
-                        .context(Io { path: dir_dst })?;
+                    if force_overwrite {
+                        fs::remove_file(dir_dst)
+                            .await
+                            .context(Io { path: dir_dst })?;
+                    } else {
+                        return Err(Error::AlreadyExists { path: path_dst });
+                    }
                 }
             } else {
                 log::trace!("Creating directory {:?}", &dir_dst);
@@ -89,21 +124,47 @@ impl GCS2Local {
             }
         }
 
-        if object_src.name.ends_with('/') {
-            match path_dst.metadata() {
-                Ok(md) if md.is_dir() => {}
-                Ok(_) => {
+        Ok(())
+    }
+
+    async fn maybe_create_dir(
+        force_overwrite: bool,
+        path_dst: impl AsRef<Path>,
+    ) -> Result<Option<PathBuf>> {
+        let path_dst = path_dst.as_ref();
+        let path_dst = PathBuf::from(path_dst);
+        let path_dst = path_dst.as_path();
+        match path_dst.metadata() {
+            Ok(md) if md.is_dir() => Ok(None),
+            Ok(_) => {
+                if force_overwrite {
                     std::fs::remove_file(path_dst).context(Io { path: path_dst })?;
                     std::fs::create_dir(path_dst).context(Io { path: path_dst })?;
+                    Ok(Some(path_dst.to_owned()))
+                } else {
+                    Err(Error::AlreadyExists {
+                        path: PathBuf::from(path_dst),
+                    })
                 }
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-                    std::fs::create_dir(path_dst).context(Io { path: path_dst })?;
-                }
-                Err(err) => {
-                    Err(err).context(Io { path: path_dst })?;
-                }
-            };
-        } else if !self.should_download(&object_src, path_dst).await? {
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                std::fs::create_dir(path_dst).context(Io { path: path_dst })?;
+                Ok(Some(path_dst.to_owned()))
+            }
+            Err(err) => Err(err).context(Io { path: path_dst }),
+        }
+    }
+
+    async fn download_object(
+        force_overwrite: bool,
+        bucket_src: &str,
+        path_dst: impl AsRef<Path>,
+        object_src: Object,
+    ) -> Result<usize> {
+        let mut count = 0;
+        let path_dst = path_dst.as_ref();
+
+        if !Self::should_download(force_overwrite, &object_src, path_dst).await? {
             log::trace!("Skip {:?}", object_src.name);
         } else {
             log::trace!(
@@ -143,8 +204,12 @@ impl GCS2Local {
         Ok(count)
     }
 
-    async fn should_download(&self, object: &Object, path_dst: impl AsRef<Path>) -> Result<bool> {
-        if self.force_overwrite {
+    async fn should_download(
+        force_overwrite: bool,
+        object: &Object,
+        path_dst: impl AsRef<Path>,
+    ) -> Result<bool> {
+        if force_overwrite {
             return Ok(true);
         }
 

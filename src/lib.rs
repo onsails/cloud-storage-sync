@@ -86,8 +86,11 @@ impl Sync {
     /// Arguments:
     ///
     /// * `force_overwrite`: Don't do size and checksum comparison, just overwrite everthing
-    pub fn new(force_overwrite: bool) -> Self {
-        let gcs2local = GCS2Local { force_overwrite };
+    pub fn new(force_overwrite: bool, concurrency: usize) -> Self {
+        let gcs2local = GCS2Local {
+            force_overwrite,
+            concurrency,
+        };
         Self {
             force_overwrite,
             gcs2local,
@@ -377,7 +380,7 @@ mod tests {
             let prefix = "local_file_upload";
             init(prefix).await;
             let populated = PopulatedDir::new().unwrap();
-            let sync = Sync::new(false);
+            let sync = Sync::new(false, 2);
             for i in 0..2 {
                 let op_count = sync
                     .sync_local_file_to_gcs(
@@ -412,7 +415,7 @@ mod tests {
             let prefix = "local_dir_upload";
             init(prefix).await;
             let populated = PopulatedDir::new().unwrap();
-            let sync = Sync::new(false);
+            let sync = Sync::new(false, 2);
 
             for i in 0..2 {
                 log::info!("upload iter {}", i);
@@ -432,12 +435,13 @@ mod tests {
                 }
             }
 
+            let dir = TempDir::new("cloud-storage-sync").unwrap();
             for i in 0..2 {
                 let op_count = sync
-                    .sync_gcs_to_local(&env_bucket(), prefix, &populated.empty)
+                    .sync_gcs_to_local(&env_bucket(), prefix, dir.as_ref())
                     .await
                     .unwrap();
-                populated.assert_match(&populated.empty).unwrap();
+                populated.assert_match(&dir.as_ref()).unwrap();
 
                 if i == 0 {
                     // 2 op_count because we don't need to download an empty_dir/ object
@@ -519,12 +523,14 @@ mod tests {
             Ok(())
         }
 
+        #[allow(clippy::expect_fun_call)]
         fn assert_match(&self, path: impl AsRef<Path>) -> Result<()> {
             self.assert_file_match(&path, "somefile", "somefilecontents")?;
             self.assert_file_match(&path, "somedir/dirfile", &self.dirfilecontents)?;
+            let empty_dir = format!("{}/empty_dir", path.to_str_wrap().unwrap());
             assert!(
-                std::fs::metadata(format!("{}/empty_dir", path.to_str_wrap().unwrap()))
-                    .expect("empty_dir should exist")
+                std::fs::metadata(empty_dir.clone())
+                    .expect(&format!("{} should exist", empty_dir))
                     .is_dir(),
                 "empty_dir should be a dir"
             );

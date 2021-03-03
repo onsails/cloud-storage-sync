@@ -1,7 +1,7 @@
 use crate::error::*;
 use crate::util::*;
 use crate::Result;
-use cloud_storage::object::Object;
+use cloud_storage::{object::Object, ListRequest};
 use futures::stream::FuturesUnordered;
 use futures::stream::{StreamExt, TryStreamExt};
 use snafu::{futures::TryStreamExt as SnafuTryStreamExt, ResultExt};
@@ -32,13 +32,18 @@ impl GCS2Local {
             dst_dir.as_ref()
         );
         let dst_dir = dst_dir.as_ref();
-        let objects_src =
-            Object::list_prefix(bucket_src, path_src)
-                .await
-                .context(CloudStorage {
-                    object: path_src.to_owned(),
-                    op: OpSource::pre(OpSource::ListPrefix),
-                })?;
+        let objects_src = Object::list(
+            bucket_src,
+            ListRequest {
+                prefix: Some(path_src.to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .context(CloudStorage {
+            object: path_src.to_owned(),
+            op: OpSource::pre(OpSource::ListPrefix),
+        })?;
         objects_src
             .context(CloudStorage {
                 object: path_src.to_owned(),
@@ -50,7 +55,7 @@ impl GCS2Local {
                 |(mut count, dst_dir), object_srcs| async move {
                     let mut jobs_pool = FuturesUnordered::new();
 
-                    for object_src in object_srcs {
+                    for object_src in object_srcs.items {
                         if jobs_pool.len() == self.concurrency {
                             // unwrap because it's not empty
                             count += jobs_pool.next().await.unwrap()?;

@@ -10,7 +10,7 @@ mod util;
 
 use crate::error::*;
 use crate::util::*;
-use cloud_storage::object::Object;
+use cloud_storage::{object::Object, ListRequest};
 use futures::future::{BoxFuture, FutureExt};
 use futures::stream::TryStreamExt;
 use snafu::{futures::TryStreamExt as SnafuTryStreamExt, ResultExt};
@@ -155,13 +155,18 @@ impl Sync {
         bucket_dst: &str,
         path_dst: &str,
     ) -> Result<usize, Error> {
-        let objects_src =
-            Object::list_prefix(bucket_src, path_src)
-                .await
-                .context(CloudStorage {
-                    object: path_src.to_owned(),
-                    op: OpSource::pre(OpSource::ListPrefix),
-                })?;
+        let objects_src = Object::list(
+            bucket_src,
+            ListRequest {
+                prefix: Some(path_src.to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .context(CloudStorage {
+            object: path_src.to_owned(),
+            op: OpSource::pre(OpSource::ListPrefix),
+        })?;
         objects_src
             .context(CloudStorage {
                 object: path_src.to_owned(),
@@ -171,7 +176,7 @@ impl Sync {
             .try_fold(
                 (0usize, bucket_dst, path_dst),
                 |(mut count, bucket_dst, path_dst), object_srcs| async move {
-                    for object_src in object_srcs {
+                    for object_src in object_srcs.items {
                         object_src
                             .copy(bucket_dst, path_dst)
                             .await
@@ -463,10 +468,17 @@ mod tests {
 
     async fn clear_bucket(prefix: &str) -> Result<(), cloud_storage::Error> {
         let bucket = env_bucket();
-        let objects = Object::list_prefix(&bucket, prefix).await?;
+        let objects = Object::list(
+            &bucket,
+            ListRequest {
+                prefix: Some(prefix.to_owned()),
+                ..Default::default()
+            },
+        )
+        .await?;
         objects
             .try_for_each(|objects| async {
-                for object in objects {
+                for object in objects.items {
                     log::trace!("deleting gs://{}{}", &object.bucket, &object.name);
                     Object::delete(&object.bucket, &object.name).await?;
                 }

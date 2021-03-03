@@ -12,7 +12,7 @@ keywords = ["sync", "rsync", "google-cloud", "google", "cloud"]
 edition = "2018"
 
 [dependencies]
-cloud-storage = "0.7"
+cloud-storage = "0.8"
 futures = "0.3"
 futures-io = "0.3"
 tokio = { version = "1.2", features = [ "fs" ] }
@@ -33,8 +33,8 @@ arrayref = "0.3"
 [dev-dependencies]
 env_logger = "0.8"
 tempdir = "0.3"
-dotenv = "0.15.0"
-lazy_static = "1.4.0"
+dotenv = "0.15"
+lazy_static = "1.4"
 
 [dev-dependencies.tokio]
 version = "1.2"

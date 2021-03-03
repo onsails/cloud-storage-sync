@@ -48,4 +48,7 @@ pub enum Error {
     WrongPath {
         path: PathBuf,
     },
+    AlreadyExists {
+        path: PathBuf,
+    },
 }

@@ -1,11 +1,6 @@
-
-
-
-
-
+use cloud_storage::Object;
 use std::path::Path;
-use tokio::fs::*;
-
+use tokio::{fs::*, io::AsyncReadExt};
 
 pub(crate) struct FileUtil;
 
@@ -17,6 +12,35 @@ impl FileUtil {
     pub(crate) async fn is_dir(path: impl AsRef<Path>) -> bool {
         metadata(path).await.map(|m| m.is_dir()).unwrap_or(false)
     }
+}
+
+pub(crate) trait CrcDecode {
+    fn crc32c_decode(&self) -> u32;
+}
+
+impl CrcDecode for Object {
+    fn crc32c_decode(&self) -> u32 {
+        let crc32c_vec = base64::decode(&self.crc32c).unwrap();
+        u32::from_be_bytes(*array_ref!(crc32c_vec, 0, 4))
+    }
+}
+
+pub(crate) async fn file_crc32c(file: impl AsRef<Path>) -> Result<u32, std::io::Error> {
+    let mut file = File::open(file).await.unwrap();
+
+    let mut crc = 0u32;
+    loop {
+        let len = {
+            let mut buffer = bytes::BytesMut::with_capacity(1024 * 8);
+            file.read_buf(&mut buffer).await?;
+            crc = crc32c::crc32c_append(crc, &buffer);
+            buffer.len()
+        };
+        if len == 0 {
+            break;
+        }
+    }
+    Ok(crc)
 }
 
 // https://stackoverflow.com/questions/62290132/how-do-i-convert-a-futures-ioasyncread-to-rusotobytestream

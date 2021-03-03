@@ -3,3 +3,4 @@
 service-account.json
 .vscode
 Cargo.lock
+test.sh

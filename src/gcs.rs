@@ -1,7 +1,7 @@
 use crate::error::*;
 use crate::util::*;
 use crate::Result;
-use cloud_storage::{object::Object, ListRequest};
+use cloud_storage::{object::Object, Client, ListRequest};
 use futures::stream::FuturesUnordered;
 use futures::stream::{StreamExt, TryStreamExt};
 use snafu::{futures::TryStreamExt as SnafuTryStreamExt, ResultExt};
@@ -10,16 +10,30 @@ use tokio::fs::{self, File};
 use tokio::io::AsyncWriteExt;
 
 #[derive(Debug)]
-pub struct GCS2Local {
+pub struct GcsSource {
     pub(crate) force_overwrite: bool,
     pub(crate) concurrency: usize,
+    pub(crate) client: Client,
 }
 
-impl GCS2Local {
-    /// Syncs remote GCS bucket path to a local path
+impl GcsSource {
+    pub fn new(force_overwrite: bool, concurrency: usize) -> Self {
+        let client = Client::default();
+        Self {
+            force_overwrite,
+            concurrency,
+            client,
+        }
+    }
+
+    pub fn client(&self) -> &Client {
+        &self.client
+    }
+
+    /// Syncs remote Gcs bucket path to a local path
     ///
     /// Returns actual downloads count
-    pub async fn sync_gcs_to_local(
+    pub async fn to_local(
         &self,
         bucket_src: &str,
         path_src: &str,
@@ -32,18 +46,23 @@ impl GCS2Local {
             dst_dir.as_ref()
         );
         let dst_dir = dst_dir.as_ref();
-        let objects_src = Object::list(
-            bucket_src,
-            ListRequest {
-                prefix: Some(path_src.to_owned()),
-                ..Default::default()
-            },
-        )
-        .await
-        .context(CloudStorage {
-            object: path_src.to_owned(),
-            op: OpSource::pre(OpSource::ListPrefix),
-        })?;
+        log::trace!("Requesting objects");
+        let objects_src = self
+            .client
+            .object()
+            .list(
+                bucket_src,
+                ListRequest {
+                    prefix: Some(path_src.to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .context(CloudStorage {
+                object: path_src.to_owned(),
+                op: OpSource::pre(OpSource::ListPrefix),
+            })?;
+        log::trace!("iterating objects");
         objects_src
             .context(CloudStorage {
                 object: path_src.to_owned(),
@@ -53,9 +72,12 @@ impl GCS2Local {
             .try_fold(
                 (0usize, dst_dir),
                 |(mut count, dst_dir), object_srcs| async move {
+                    log::trace!("objects: {:?}", object_srcs);
                     let mut jobs_pool = FuturesUnordered::new();
 
                     for object_src in object_srcs.items {
+                        log::trace!("object: {:?}", object_src);
+
                         if jobs_pool.len() == self.concurrency {
                             // unwrap because it's not empty
                             count += jobs_pool.next().await.unwrap()?;
@@ -87,6 +109,7 @@ impl GCS2Local {
 
                         let path_dst = path_dst.to_str().expect("valid utf8 file name").to_owned();
 
+                        log::trace!("downloading object {:?}", object_src);
                         let job = Self::download_object(
                             self.force_overwrite,
                             bucket_src,
@@ -96,15 +119,68 @@ impl GCS2Local {
 
                         jobs_pool.push(job);
                     }
+
+                    log::trace!("waiting for jobs completion");
                     while let Some(job) = jobs_pool.next().await {
                         count += job?;
                     }
+                    log::trace!("all jobs completed");
 
                     Ok((count, dst_dir))
                 },
             )
             .await
             .map(|(count, _)| count)
+    }
+
+    /// Copies remote Gcs bucket file or directory to another remote Gcs bucket file or directory
+    pub async fn to_gcs(
+        &self,
+        bucket_src: &str,
+        path_src: &str,
+        bucket_dst: &str,
+        path_dst: &str,
+    ) -> Result<usize, Error> {
+        let objects_src = self
+            .client
+            .object()
+            .list(
+                bucket_src,
+                ListRequest {
+                    prefix: Some(path_src.to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .context(CloudStorage {
+                object: path_src.to_owned(),
+                op: OpSource::pre(OpSource::ListPrefix),
+            })?;
+        objects_src
+            .context(CloudStorage {
+                object: path_src.to_owned(),
+                op: OpSource::ListPrefix,
+            })
+            // .map_err(Error::from)
+            .try_fold(
+                (0usize, bucket_dst, path_dst),
+                |(mut count, bucket_dst, path_dst), object_srcs| async move {
+                    for object_src in object_srcs.items {
+                        object_src
+                            .copy(bucket_dst, path_dst)
+                            .await
+                            .context(CloudStorage {
+                                object: path_dst.to_owned(),
+                                op: OpSource::CopyObject,
+                            })?;
+                        count += 1;
+                    }
+
+                    Ok((count, bucket_dst, path_dst))
+                },
+            )
+            .await
+            .map(|(count, ..)| count)
     }
 
     async fn create_parent_dirs(force_overwrite: bool, path_dst: impl AsRef<Path>) -> Result<()> {

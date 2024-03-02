@@ -26,7 +26,7 @@ mime = "0.3"
 reqwest = "0.11"
 log = "0.4"
 crc32c = "0.6"
-base64 = "0.13"
+base64 = "0.22"
 arrayref = "0.3"
 
 [dev-dependencies]
